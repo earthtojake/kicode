@@ -10,7 +10,11 @@
 # architecture with lipo, which keeps each slice's own signature: nothing is re-signed, and KiCad's
 # signatures are verified before the script ends. Kept under Contents/MacOS so the system still finds
 # PlugIns/ beside it, as in the bundle.
-# No .app, no Info.plist (kicad-cli's signature binds none), no crash handler, no GUI binaries.
+# No .app, no crash handler, no GUI binaries. One file of ours: Contents/Info.plist, marking kicad-cli
+# background-only, without which macOS puts a Dock icon up for every run (it registers a Cocoa program
+# as a foreground app; KiCad's own kicad-cli shows the KiCad icon). kicad-cli's signature binds no
+# Info.plist, so every binary's signature stays valid; the folder is no sealed bundle, which macOS only
+# asks of a quarantined download (an installed wheel is none).
 set -euo pipefail
 
 dmg=$1 arch=$2 out=$3
@@ -62,4 +66,25 @@ done
 # KiCad's signatures, intact on every thinned binary.
 find "$dest" -type f \( -name kicad-cli -o -name '*.dylib' -o -name '*.kiface' -o -name '*.so' \) -print0 |
     xargs -0 -n 1 codesign --verify --strict
+
+# Written after the check: with an Info.plist beside it, codesign also asks the folder for a bundle seal.
+cat > "$dest/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.texttocad.kicad-cli-bin</string>
+	<key>CFBundleName</key>
+	<string>kicad-cli</string>
+	<key>CFBundleExecutable</key>
+	<string>kicad-cli</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>LSBackgroundOnly</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+plutil -lint -s "$dest/Info.plist"
 echo "staged $(find "$dest" -type f | wc -l | tr -d ' ') files, $(du -sh "$dest" | cut -f1), in $dest"
