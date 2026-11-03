@@ -214,9 +214,14 @@ for elf in "$bin"/*; do file -b "$elf" | grep -q ELF && patchelf --force-rpath -
 for elf in "$lib"/*; do [ -f "$elf" ] || continue; patchelf --force-rpath --set-rpath '$ORIGIN' "$elf"; done  # the plugins' folder too
 for elf in "$plugins"/*; do patchelf --force-rpath --set-rpath '$ORIGIN/../../../..' "$elf"; done
 
-# The glibc floor: no staged ELF may need a symbol version newer than Debian 12's glibc, 2.36.
-newest=$(for elf in "$bin"/* "$plugins"/* "$lib"/*; do objdump -T "$elf" 2>/dev/null; done |
-    grep -o 'GLIBC_2\.[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -u -V | tail -1)
+# The glibc floor: no staged ELF may need a symbol version newer than Debian 12's glibc, 2.36. ($lib holds
+# the plugins' folder too: only its files are ELFs.)
+for elf in "$bin"/* "$plugins"/* "$lib"/*; do
+    [ -f "$elf" ] || continue
+    objdump -T "$elf" || { echo "objdump cannot read $elf" >&2; exit 1; }
+done > "$work/symbols"
+newest=$(grep -o 'GLIBC_2\.[0-9][0-9.]*' "$work/symbols" | sed 's/GLIBC_//' | sort -u -V | tail -1)
+test -n "$newest" || { echo "no staged ELF names a glibc version" >&2; exit 1; }
 if [ "$(printf '%s\n2.36\n' "$newest" | sort -V | tail -1)" != "2.36" ]; then
     echo "a staged library needs glibc $newest, newer than 2.36" >&2; exit 1
 fi
