@@ -109,11 +109,19 @@ jobs:
         env:
           # A scheduled build pairs the newest client; the smoke tests' API round trip fails a mismatch.
           KIPY: ${{ inputs.kicad_python || 'main' }}
+          NIGHTLY: ${{ needs.resolve.outputs.version }}
         run: |
           git clone --quiet https://gitlab.com/kicad/code/kicad-python.git kicad-python
           git -C kicad-python checkout --quiet "$KIPY"
           git -C kicad-python submodule update --quiet --init --recursive
           echo "commit=$(git -C kicad-python rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Every build of kicad-python's main says the same version (0.9.0.dev0), which installers cache
+          # by: stamp this one with the nightly's date (0.9.0.dev20261031) so each release's is its own.
+          base=$(sed -n 's/^version = "\(.*\)"$/\1/p' kicad-python/pyproject.toml | head -1)
+          stamped="${base%%.dev*}.dev${NIGHTLY##*.dev}"
+          sed -i "s/^version = \"$base\"$/version = \"$stamped\"/" kicad-python/pyproject.toml
+          grep -q "^version = \"$stamped\"$" kicad-python/pyproject.toml
+          echo "kicad-python $base -> $stamped"
           uv build --wheel --out-dir dist kicad-python
           # Its poetry build script (which generates the protobuf code) tags the wheel for the building
           # interpreter and platform; the wheel is pure Python, so it is retagged for every one.
