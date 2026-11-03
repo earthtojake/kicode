@@ -2,7 +2,8 @@
 
     python scripts/make_wheel.py --staged <dir> --version 10.99.0.dev20261031 --platform macosx_14_0_arm64 \
         --kicad-version 10.99.0 --commit 113c71d59d... --kicad-licenses <dir> --out dist/
-    python scripts/make_wheel.py --meta --version 10.99.0.dev20261031 --out dist/
+    python scripts/make_wheel.py --meta --version 10.99.0.dev20261031 [--kicad-version 10.99.0 --commit 113c...] \
+        --out dist/
 
 kicode is three distributions of one version: kicode-pcb (a wheel per platform: kicad-cli, its board
 support, every library it links, and KiPy, as the `kicode` import package), kicode-sch (a wheel per
@@ -20,8 +21,9 @@ src/kicode and _build.py written for this build.
 Each wheel's dist-info/licenses/ gets this repository's LICENSE; both platform wheels also <kicad-licenses>
 (KiCad's notices from the same commit) under kicad/; kicode-pcb's also <staged>/licenses/ as it is (KiPy's
 licence under kipy/, and on Linux the notices of every library it bundles under linux/), kicode-sch's
-<staged>/schematic/licenses/ (on Linux, the notices of the libraries only it bundles). kicode's Summary is
-the first line of README.md's text, and README.md every wheel's description.
+<staged>/schematic/licenses/ (on Linux, the notices of the libraries only it bundles). README.md is every
+wheel's description, with a line saying which distribution's page it is after the README's first line
+(which must say kicode is unofficial).
 
 A wheel of 100 MB or more (1e8 bytes, as PyPI counts the file it limits) is not written: the build fails
 instead, so none can reach an upload. A wheel holds no symlinks: a stager copies each file under the
@@ -46,24 +48,28 @@ META, PCB, SCH = "kicode", "kicode-pcb", "kicode-sch"
 REPOSITORY = "https://github.com/earthtojake/kicode"
 LIMIT = 100_000_000
 SUMMARIES = {
-    PCB: "kicode's board side: KiCad's command line with its PCB support and KiPy, its IPC API client, as the "
-         "kicode package. Unofficial; not affiliated with or endorsed by the KiCad project.",
-    SCH: "kicode's schematic side: KiCad's schematic support for kicad-cli's sch and sym commands. Unofficial; "
-         "not affiliated with or endorsed by the KiCad project.",
+    META: "Unofficial headless build of KiCad's command line and IPC API client. Not affiliated with or "
+          "endorsed by the KiCad project.",
+    PCB: "kicode's board side: KiCad's command line with its PCB support, and KiPy, its IPC API client, as the "
+         "kicode package. Unofficial: not made, endorsed or supported by the KiCad project.",
+    SCH: "kicode's schematic side: KiCad's schematic support for kicad-cli's sch and sym commands. Unofficial: "
+         "not made, endorsed or supported by the KiCad project.",
 }
+UNOFFICIAL = "Unofficial: not made, endorsed or supported by the KiCad project."
 CLASSIFIERS = ["Operating System :: MacOS", "Operating System :: Microsoft :: Windows",
                "Operating System :: POSIX :: Linux",
                "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)"]
 VERSION = re.compile(r"[0-9]+(\.[0-9]+)*((a|b|rc)[0-9]+)?(\.post[0-9]+)?(\.dev[0-9]+)?")
 
 
-def _readme() -> tuple[str, str]:
-    """README.md, and the first line of its text under the title: kicode's Summary."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    for line in readme.splitlines():
-        if line.strip() and not line.startswith("#"):
-            return readme, line.strip()
-    raise SystemExit("README.md has no text under its title")
+def _description(lead: str) -> str:
+    """README.md, with `lead` (which distribution's page this is) after its first line, which says kicode is
+    unofficial: every distribution's PyPI page is the README."""
+    lines = (ROOT / "README.md").read_text(encoding="utf-8").splitlines()
+    first = next((index for index, line in enumerate(lines) if line.strip() and not line.startswith("#")), None)
+    if first is None or lines[first].strip() != UNOFFICIAL:
+        raise SystemExit(f"README.md's first line under its title must be: {UNOFFICIAL}")
+    return "\n".join([*lines[:first + 1], "", f"> {lead}", *lines[first + 1:]]) + "\n"
 
 
 class Wheel:
@@ -105,13 +111,12 @@ class Wheel:
             if path.is_file():
                 self.add_licenses_file(f"{prefix}{path.relative_to(folder).as_posix()}", path)
 
-    def finish(self, version: str, summary: str, requires: list[str], requires_python: str, urls: list[str],
-               lead: str, readme: str) -> Path:
+    def finish(self, version: str, requires: list[str], requires_python: str, urls: list[str], lead: str) -> Path:
         metadata = "\n".join([
             "Metadata-Version: 2.4",
             f"Name: {self.name}",
             f"Version: {version}",
-            f"Summary: {summary}",
+            f"Summary: {SUMMARIES[self.name]}",
             "License-Expression: GPL-3.0-or-later",
             *(f"License-File: {name}" for name in self.licenses),
             f"Requires-Python: {requires_python}",
@@ -121,9 +126,7 @@ class Wheel:
             *(f"Project-URL: {url}" for url in urls),
             "Description-Content-Type: text/markdown",
             "",
-            lead,
-            "",
-            readme,
+            _description(lead),
         ])
         self.add(f"{self.info}/METADATA", metadata.encode())
         self.add(f"{self.info}/WHEEL", (f"Wheel-Version: 1.0\nGenerator: kicode make_wheel\n"
@@ -142,12 +145,12 @@ class Wheel:
         return self.path
 
 
-def meta(version: str, out: Path) -> Path:
+def meta(version: str, kicad_version: str | None, commit: str | None, out: Path) -> Path:
     """kicode's own wheel: no files, kicode-pcb and kicode-sch of the same version."""
-    readme, summary = _readme()
     wheel = Wheel(out, META, version, "py3-none-any", purelib=True)
-    return wheel.finish(version, summary, [f"{PCB}=={version}", f"{SCH}=={version}"], ">=3.9", [],
-                        f"kicode {version}: {PCB} and {SCH} of the same version.", readme)
+    of = f", KiCad {kicad_version} at commit `{commit[:10]}`" if kicad_version and commit else ""
+    return wheel.finish(version, [f"{PCB}=={version}", f"{SCH}=={version}"], ">=3.9", [],
+                        f"This is **kicode** {version}, which installs {PCB} and {SCH} {version}{of}.")
 
 
 def platform(staged: Path, version: str, tag: str, kicad_version: str, commit: str, kicad_licenses: Path | None,
@@ -166,7 +169,6 @@ def platform(staged: Path, version: str, tag: str, kicad_version: str, commit: s
     if missing or not any(name.endswith(("/_eeschema.kiface", "/_eeschema.dll")) for name in schematic):
         raise SystemExit(f"{listing} must name the staged eeschema kiface and only staged files; not staged: {missing}")
     kipy = json.loads((staged / "kipy.json").read_text(encoding="utf-8"))
-    readme, _ = _readme()
     ours = sorted((ROOT / "src" / PACKAGE).glob("*.py"))
     own = {f"{PACKAGE}/{source.name}" for source in ours}
     requires_python = kipy["requires_python"] or ">=3.9"
@@ -192,19 +194,20 @@ def platform(staged: Path, version: str, tag: str, kicad_version: str, commit: s
     pcb.add_licenses(staged / "licenses")
     if not any(name.startswith("kipy/") for name in pcb.licenses):
         raise SystemExit(f"no KiPy licence in {staged / 'licenses' / 'kipy'}")
-    lead = f"KiCad {kicad_version}, commit {commit}"
-    wheels = [pcb.finish(version, SUMMARIES[PCB], kipy["requires_dist"], requires_python,
+    kicad = f"KiCad {kicad_version} at commit `{commit[:10]}`"
+    wheels = [pcb.finish(version, kipy["requires_dist"], requires_python,
                          [kicad_url, f"KiPy source, https://gitlab.com/kicad/code/kicad-python/-/tree/{kipy['commit']}"],
-                         f"{lead}; KiPy ({kipy['name']}) {kipy['version']}, commit {kipy['commit']}.", readme)]
+                         f"This is **{PCB}** {version}, kicode's board side and its `kicode` package: {kicad}, with "
+                         f"KiPy ({kipy['name']}) {kipy['version']} at commit `{kipy['commit'][:10]}`.")]
 
     sch = Wheel(out, SCH, version, tag)
     for relative in schematic:
         sch.add_file(f"{PACKAGE}/{relative}", package / relative)
     sch.add_licenses(kicad_licenses, "kicad/")
     sch.add_licenses(staged / "schematic" / "licenses")
-    wheels.append(sch.finish(version, SUMMARIES[SCH], [f"{PCB}=={version}"], requires_python, [kicad_url],
-                             f"{lead}: the {len(schematic)} files only its schematic kifaces need, installed into "
-                             f"{PCB}'s folder.", readme))
+    wheels.append(sch.finish(version, [f"{PCB}=={version}"], requires_python, [kicad_url],
+                             f"This is **{SCH}** {version}, kicode's schematic side: the {len(schematic)} files of "
+                             f"{kicad} that only its schematic kifaces need, installed into {PCB}'s folder."))
     return wheels
 
 
@@ -222,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     if not VERSION.fullmatch(args.version):
         parser.error(f"not a plain version: {args.version}")
     if args.meta:
-        meta(args.version, args.out)
+        meta(args.version, args.kicad_version, args.commit, args.out)
         return 0
     if not (args.staged and args.platform and args.kicad_version and args.commit):
         parser.error("a platform's wheels need --staged, --platform, --kicad-version and --commit")

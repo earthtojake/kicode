@@ -122,7 +122,9 @@ jobs:
           path: licenses/
       - name: kicode's own wheel
         if: steps.build.outputs.build == 'true'
-        run: python3 scripts/make_wheel.py --meta --version "${{ steps.nightly.outputs.version }}" --out dist
+        run: |
+          python3 scripts/make_wheel.py --meta --version "${{ steps.nightly.outputs.version }}" \
+            --kicad-version "${{ steps.nightly.outputs.kicad_version }}" --commit "${{ steps.nightly.outputs.commit }}" --out dist
       - uses: actions/upload-artifact@v7
         if: steps.build.outputs.build == 'true'
         with:
