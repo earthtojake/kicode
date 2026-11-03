@@ -1,0 +1,335 @@
+# Build kicad-cli-bin's wheels of one KiCad nightly, smoke-test each on its platform, and publish them.
+#
+# Dispatched by hand: a KiCad commit, or none for the newest commit KiCad has published a macOS and a
+# Windows nightly of. macOS and Windows repackage KiCad's own builds of the commit; Linux builds the
+# same commit from source on Debian 12. Each wheel is smoke-tested where it will run (Linux also in bare
+# roots with no KiCad, GTK or X11 installed). With `publish`, every wheel, the matched kicad-python
+# wheel and the corresponding source go to a GitHub Release named for the version, whose page is the
+# find-links index (README.md).
+#
+# A push or pull request runs only `check`: the scripts parse.
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "KiCad commit (10+ hex characters); empty for the newest with macOS and Windows nightlies"
+        required: false
+        default: ""
+      kicad_python:
+        description: "kicad-python commit to build the matched client from"
+        required: false
+        default: "87b945a0"
+      publish:
+        description: "Publish the GitHub Release"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  check:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: The scripts parse
+        run: |
+          python3 -m py_compile scripts/*.py tests/*.py src/kicad_cli_bin/*.py
+          for script in scripts/*.sh; do bash -n "$script"; done
+
+  resolve:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.nightly.outputs.commit }}
+      kicad_version: ${{ steps.nightly.outputs.kicad_version }}
+      kicad_full_version: ${{ steps.nightly.outputs.kicad_full_version }}
+      version: ${{ steps.nightly.outputs.version }}
+      tag: ${{ steps.nightly.outputs.tag }}
+      macos_url: ${{ steps.nightly.outputs.macos_url }}
+      windows_url: ${{ steps.nightly.outputs.windows_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Find the nightly on every platform
+        id: nightly
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: python3 scripts/resolve_nightly.py ${COMMIT:+--commit "$COMMIT"}
+      - name: KiCad's notices at the commit
+        run: python3 scripts/kicad_licenses.py "${{ steps.nightly.outputs.commit }}" licenses
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kicad-licenses
+          path: licenses/
+
+  # The KiPy the release pairs with this KiCad: its API changes with the nightly, and the matched client
+  # is not on PyPI. Pure Python, so one wheel serves every platform.
+  kicad-python:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Build kicad-python at the commit
+        env:
+          KIPY: ${{ inputs.kicad_python }}
+        run: |
+          git clone --quiet https://gitlab.com/kicad/code/kicad-python.git kicad-python
+          git -C kicad-python checkout --quiet "$KIPY"
+          git -C kicad-python submodule update --quiet --init --recursive
+          uv build --wheel --out-dir dist kicad-python
+          ls -la dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kicad-python
+          path: dist/*.whl
+
+  macos:
+    needs: [resolve, kicad-python]
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-licenses
+          path: licenses
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: kipy
+      - name: Download KiCad's macOS nightly
+        env:
+          URL: ${{ needs.resolve.outputs.macos_url }}
+        run: curl -fsSL --retry 5 -o kicad.dmg "$URL"
+      - name: Stage kicad-cli (arm64)
+        run: scripts/stage_macos.sh kicad.dmg arm64 stage
+      - name: Make the wheel
+        run: |
+          python3 scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
+            --platform macosx_14_0_arm64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
+            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
+      - name: Smoke test
+        run: |
+          uv venv --python 3.12 smoke
+          uv pip install --python smoke dist/*.whl kipy/*.whl
+          smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-macos-arm64
+          path: dist/*.whl
+
+  # The wheel says macOS 14: run it on 14, not only on the runner that built it.
+  macos-14:
+    needs: [resolve, macos, kicad-python]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-macos-arm64
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: kipy
+      - name: Smoke test on macOS 14
+        run: |
+          sw_vers
+          uv venv --python 3.12 smoke
+          uv pip install --python smoke dist/*.whl kipy/*.whl
+          smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+
+  windows:
+    needs: [resolve, kicad-python]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-licenses
+          path: licenses
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: kipy
+      - name: Download KiCad's Windows nightly
+        env:
+          URL: ${{ needs.resolve.outputs.windows_url }}
+        run: curl -fsSL --retry 5 -o kicad.exe "$URL"
+      - name: Stage kicad-cli
+        run: python scripts/stage_windows.py kicad.exe stage
+      - name: Make the wheel
+        run: |
+          python scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
+            --platform win_amd64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
+            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
+      - name: Smoke test
+        run: |
+          uv venv --python 3.12 smoke
+          uv pip install --python smoke/Scripts/python.exe dist/*.whl kipy/*.whl
+          smoke/Scripts/python.exe tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-windows-x86_64
+          path: dist/*.whl
+
+  linux:
+    needs: resolve
+    runs-on: ubuntu-latest
+    container: debian:12
+    timeout-minutes: 330
+    env:
+      CCACHE_DIR: /ccache
+      CCACHE_MAXSIZE: 4G
+      KICAD_FULL_VERSION: ${{ needs.resolve.outputs.kicad_full_version }}
+    steps:
+      - name: Tools the steps below need in a bare container
+        run: apt-get update -q && apt-get install -y -q --no-install-recommends git ca-certificates zstd python3
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-licenses
+          path: licenses/kicad
+      # Each nightly is a new commit, so a build reuses the newest earlier one's objects; saved even when
+      # the build fails, so the next attempt starts where this one stopped.
+      - uses: actions/cache/restore@v4
+        with:
+          path: /ccache
+          key: ccache-linux-${{ needs.resolve.outputs.commit }}-${{ github.run_id }}
+          restore-keys: ccache-linux-
+      - name: Build and stage kicad-cli
+        run: scripts/build_linux.sh "${{ needs.resolve.outputs.commit }}" stage
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: /ccache
+          key: ccache-linux-${{ needs.resolve.outputs.commit }}-${{ github.run_id }}
+      - name: Make the wheel
+        run: |
+          mkdir -p licenses/debian && cp stage/licenses/* licenses/debian/
+          python3 scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
+            --platform manylinux_2_36_x86_64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
+            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
+      - name: The bundled libraries' source
+        run: scripts/linux_sources.sh stage/sources.txt "dist-sources/kicad-cli-bin-${{ needs.resolve.outputs.version }}-linux-bundled-sources.tar"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheel-linux-x86_64
+          path: dist/*.whl
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-sources
+          path: dist-sources/
+          compression-level: 0
+
+  # The Linux wheel in roots that have none of what it bundles: no KiCad, GTK, X11 or OpenGL.
+  linux-smoke:
+    needs: [resolve, linux, kicad-python]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["python:3.12-slim-bookworm", "ubuntu:24.04", "fedora:42"]
+    container: ${{ matrix.image }}
+    steps:
+      - name: Python and the checkout's tools
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -q && apt-get install -y -q --no-install-recommends python3 python3-venv ca-certificates git
+          elif command -v dnf >/dev/null; then
+            dnf install -y -q python3 git
+          fi
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-linux-x86_64
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: kipy
+      - name: Smoke test in ${{ matrix.image }}
+        run: |
+          python3 -m venv /smoke
+          /smoke/bin/pip install -q dist/*.whl kipy/*.whl
+          cli=$(/smoke/bin/python -m kicad_cli_bin)
+          ! ldd "$cli" | grep "not found"
+          /smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+
+  publish:
+    needs: [resolve, kicad-python, macos, macos-14, windows, linux, linux-smoke]
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-sources
+          path: sources
+      - name: KiCad's source at the commit
+        run: |
+          commit="${{ needs.resolve.outputs.commit }}"
+          curl -fsSL --retry 5 -o "sources/kicad-$commit.tar.gz" \
+            "https://gitlab.com/kicad/code/kicad/-/archive/$commit/kicad-$commit.tar.gz"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+          FULL: ${{ needs.resolve.outputs.kicad_full_version }}
+        run: |
+          ls -la dist sources
+          cat > notes.md <<EOF
+          KiCad nightly \`$FULL\`, commit [\`$COMMIT\`](https://gitlab.com/kicad/code/kicad/-/commit/$COMMIT).
+
+          \`\`\`bash
+          uv pip install "kicad-cli-bin==${TAG#v}" --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/$TAG
+          \`\`\`
+
+          The kicad-python wheel is the client matched to this KiCad. The source attached: KiCad's at the
+          commit, and the Debian source package of every library the Linux wheel bundles.
+          EOF
+          gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "kicad-cli-bin ${TAG#v}" --notes-file notes.md --prerelease \
+            dist/*.whl sources/*
