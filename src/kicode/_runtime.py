@@ -1,13 +1,11 @@
-"""kicad-cli, KiCad's command line, installable from a package index.
+"""kicode's own part of the package: the KiCad command line it carries, and how to run it headless.
 
-The wheel carries KiCad's own ``kicad-cli`` and only what it loads: on macOS the binaries out of KiCad's
-signed app bundle, signatures intact; on Windows the program folder of KiCad's installer; on Linux a
-build of the same KiCad commit, with every library it links but glibc. No GUI, no libraries of
-symbols, footprints or 3D models.
-
-    >>> import kicad_cli_bin
-    >>> kicad_cli_bin.executable()            # the kicad-cli to run
-    >>> kicad_cli_bin.environment("/tmp/run") # what a run of it must have set
+The wheel carries KiCad's own ``kicad-cli`` and only what it loads, in ``kicode/_kicad/``: on macOS the
+binaries out of KiCad's signed app bundle, signatures intact; on Windows what kicad-cli loads out of the
+program folder of KiCad's installer; on Linux a build of the same KiCad commit, with every library it
+links but glibc. No GUI, no libraries of symbols, footprints or 3D models. KiCad's schematic support
+(the eeschema and cvpcb kifaces, and what only they link) is the kicode-sch package, which installs
+into the same folder (:func:`has_schematic`). Every other module of the package is KiPy's.
 
 Run it headless with :func:`environment`: KiCad otherwise reads and writes the person's own settings,
 libraries and caches.
@@ -19,11 +17,9 @@ import os
 import sys
 from pathlib import Path
 
-from ._build import KICAD_COMMIT, KICAD_VERSION
+__all__ = ["environment", "executable", "has_schematic", "stock_data_home"]
 
-__all__ = ["KICAD_COMMIT", "KICAD_VERSION", "environment", "executable", "stock_data_home"]
-
-_KICAD = Path(__file__).resolve().parent / "kicad"
+_KICAD = Path(__file__).resolve().parent / "_kicad"
 # KiCad's own homes, which a headless run keeps inside its own folder (KiCad 10 otherwise still writes
 # its documents and cache folders under the person's home).
 _HOMES = {"KICAD_CONFIG_HOME": "settings", "KICAD_DOCUMENTS_HOME": "documents", "KICAD_CACHE_HOME": "cache"}
@@ -38,8 +34,23 @@ def executable() -> Path:
     else:
         path = _KICAD / "usr" / "bin" / "kicad-cli"
     if not path.is_file():
-        raise FileNotFoundError(f"kicad-cli-bin has no kicad-cli at {path}: this wheel is not for {sys.platform}")
+        raise FileNotFoundError(f"kicode has no kicad-cli at {path}: this wheel is not for {sys.platform}")
     return path
+
+
+def _kiface(name: str) -> Path:
+    """Where kicad-cli loads one of its kifaces from (``_eeschema.kiface``; on Windows ``_eeschema.dll``)."""
+    if sys.platform == "darwin":
+        return _KICAD / "Contents" / "PlugIns" / f"_{name}.kiface"
+    if sys.platform.startswith("win"):
+        return _KICAD / "bin" / f"_{name}.dll"
+    return _KICAD / "usr" / "bin" / f"_{name}.kiface"
+
+
+def has_schematic() -> bool:
+    """Whether KiCad's schematic support is installed (the kicode-sch package, of this version): the
+    eeschema kiface, which every ``kicad-cli sch`` and ``sym`` command loads."""
+    return _kiface("eeschema").is_file()
 
 
 def stock_data_home() -> Path | None:

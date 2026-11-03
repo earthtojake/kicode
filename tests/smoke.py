@@ -1,16 +1,22 @@
-"""Smoke-test an installed kicad-cli-bin: run from the environment the wheel was installed into.
+"""Smoke-test installed kicode wheels: run from the environment they were installed into.
 
-    python tests/smoke.py [--expect-version 10.99.0] [--no-api]
+    python tests/smoke.py --installed kicode-pcb [--expect-version 10.99.0] [--no-api]   # the board side alone
+    python tests/smoke.py --installed kicode [--expect-version 10.99.0] [--no-api]       # kicode-pcb and kicode-sch
 
 Every run is headless with the package's own environment() and a scratch root, from a copy of the fixture
-board: the version, DRC, STEP, SVG and Gerber exports, a schematic's netlist, and (unless --no-api, or
-kipy is not installed) a board edited through `kicad-cli api-server` with kipy and saved. Fails when any
-step fails, or when a run left anything in the person's own KiCad folders.
+board: the version, DRC, and every board export text-to-cad uses (STEP, Gerbers, drill, positions, SVG,
+PDF); and (unless --no-api) the board edited through `kicad-cli api-server` with kicode's KiPy and saved.
+With kicode installed it also exports the schematic's netlist; with kicode-pcb alone it checks that
+`python -m kicode sch` says to install kicode-sch instead. Either way the import package must be kicode
+(KiPy's modules under it, no kipy), and the run fails when any step fails or left anything in the person's
+own KiCad folders.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import importlib.util
 import json
 import os
 import shutil
@@ -20,7 +26,7 @@ import tempfile
 import time
 from pathlib import Path
 
-import kicad_cli_bin
+import kicode
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -49,12 +55,13 @@ def _snapshot() -> dict[str, float]:
 
 class Smoke:
     def __init__(self) -> None:
-        self.root = Path(tempfile.mkdtemp(prefix="kicad-cli-bin-smoke-"))
-        self.cli = kicad_cli_bin.executable()
-        self.env = {**os.environ, **kicad_cli_bin.environment(self.root / "homes")}
+        self.root = Path(tempfile.mkdtemp(prefix="kicode-smoke-"))
+        self.cli = kicode.executable()
+        self.env = {**os.environ, **kicode.environment(self.root / "homes")}
         self.work = self.root / "work"
         shutil.copytree(FIXTURES, self.work)
         self.board = self.work / "smoke.kicad_pcb"
+        self.out = self.root / "out"
         self.failures: list[str] = []
 
     def run(self, *args: str, ok=(0,)) -> subprocess.CompletedProcess:
@@ -69,19 +76,66 @@ class Smoke:
             self.failures.append(f"kicad-cli {' '.join(args)} exited {done.returncode}: {done.stdout}\n{done.stderr}")
         return done
 
-    def expect_file(self, path: Path, what: str) -> None:
+    def export(self, kind: str, target: str, *options: str, of: Path | None = None) -> None:
+        """One `kicad-cli <pcb|sch> export <kind>`, which must write something at out/<target>."""
+        path = self.out / target
+        self.run("sch" if of else "pcb", "export", kind, *options, "-o", str(path) + (os.sep if target.endswith("/") else ""),
+                 str(of or self.board))
         if not (path.is_file() and path.stat().st_size > 0 or path.is_dir() and any(path.iterdir())):
-            self.failures.append(f"{what} wrote nothing at {path}")
+            self.failures.append(f"export {kind} wrote nothing at {path}")
+
+    def package(self, installed: str) -> None:
+        """The import package is kicode-pcb's: KiPy's modules under kicode, no kipy. kicode-sch, when there,
+        ships KiCad's files alone, and kicode (the distribution) no files at all."""
+        if not hasattr(kicode, "KiCad"):
+            self.failures.append("kicode has no KiCad (KiPy's client)")
+        files = [str(file) for file in importlib.metadata.files("kicode-pcb") or []]
+        if not any(file == "kicode/__init__.py" for file in files) or any(file.startswith("kipy/") for file in files):
+            self.failures.append("kicode-pcb does not ship the kicode package, or ships kipy/")
+        if importlib.util.find_spec("kipy") is not None:
+            self.failures.append(f"kipy is importable here ({importlib.util.find_spec('kipy').origin}): only kicode's "
+                                 "distributions and their dependencies belong in this environment")
+        for name in ("KICAD_COMMIT", "KIPY_COMMIT", "KIPY_VERSION"):
+            if not getattr(kicode, name, ""):
+                self.failures.append(f"kicode.{name} is empty")
+        everything = installed == "kicode"
+        if kicode.has_schematic() != everything:
+            self.failures.append(f"kicode.has_schematic() is {kicode.has_schematic()}, expected {everything}")
+        versions = {}
+        for name, prefixes in (("kicode-sch", ("kicode/_kicad/", "kicode_sch-")), ("kicode", ("kicode-",))):
+            try:
+                versions[name] = importlib.metadata.version(name)
+            except importlib.metadata.PackageNotFoundError:
+                if everything:
+                    self.failures.append(f"{name} is not installed")
+                continue
+            if not everything:
+                self.failures.append(f"{name} is installed beside kicode-pcb alone")
+            strays = [str(file) for file in importlib.metadata.files(name) or [] if not str(file).startswith(prefixes)]
+            if strays:
+                self.failures.append(f"{name} ships files of its own outside {prefixes[0]}: {strays[:5]}")
+        pcb = importlib.metadata.version("kicode-pcb")
+        if any(version != pcb for version in versions.values()):
+            self.failures.append(f"versions differ: kicode-pcb {pcb}, {versions}")
+        print(f"ok  kicode-pcb {pcb} {' '.join(f'{name} {version}' for name, version in versions.items())}: KiCad "
+              f"{kicode.KICAD_VERSION} ({kicode.KICAD_COMMIT[:10]}), KiPy {kicode.KIPY_VERSION} ({kicode.KIPY_COMMIT[:10]}), "
+              f"schematic {kicode.has_schematic()}")
+
+    def schematic_missing(self) -> None:
+        """Without kicode-sch, `python -m kicode sch` stops with what to install."""
+        done = subprocess.run([sys.executable, "-m", "kicode", "sch", "export", "netlist", "-o", str(self.out / "x.net"),
+                               str(self.work / "smoke.kicad_sch")], stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=60)
+        if done.returncode == 0 or "pip install kicode-sch" not in done.stderr:
+            self.failures.append(f"python -m kicode sch without kicode-sch exited {done.returncode}: {done.stderr}")
+        else:
+            print(f"ok  python -m kicode sch: {done.stderr.strip()[:160]}")
 
     def api(self) -> None:
-        try:
-            from kipy import KiCad
-            from kipy.board_types import Track
-            from kipy.geometry import Vector2
-            from kipy.proto.board.board_types_pb2 import BoardLayer
-        except ImportError:
-            print("-- kipy not installed: api-server not tested")
-            return
+        from kicode import KiCad
+        from kicode.board_types import Track
+        from kicode.proto.board.board_types_pb2 import BoardLayer
+
         sock = self.root / "api.sock"
         log = (self.root / "api-server.log").open("w")
         started = time.monotonic()
@@ -95,7 +149,7 @@ class Smoke:
                     kicad.ping()
                     board = kicad.get_board()
                     break
-                except Exception as error:  # noqa: BLE001 - kipy's, until the server listens and has loaded the board
+                except Exception as error:  # noqa: BLE001 - KiPy's, until the server listens and has loaded the board
                     if server.poll() is not None:
                         raise RuntimeError(f"api-server exited {server.returncode}") from error
                     time.sleep(0.05)
@@ -126,30 +180,35 @@ class Smoke:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--installed", required=True, choices=["kicode-pcb", "kicode"],
+                        help="kicode-pcb alone, or kicode (kicode-pcb and kicode-sch)")
     parser.add_argument("--expect-version")
     parser.add_argument("--no-api", action="store_true")
     args = parser.parse_args(argv)
 
     before = _snapshot()
     smoke = Smoke()
-    print(f"kicad-cli-bin {kicad_cli_bin.KICAD_VERSION} ({kicad_cli_bin.KICAD_COMMIT}) at {smoke.cli}")
+    print(f"kicad-cli at {smoke.cli}")
+    smoke.package(args.installed)
     version = smoke.run("version").stdout.strip()
-    expected = args.expect_version or kicad_cli_bin.KICAD_VERSION
+    expected = args.expect_version or kicode.KICAD_VERSION
     if expected and version != expected:
         smoke.failures.append(f"kicad-cli version says {version!r}, expected {expected!r}")
-    out = smoke.root / "out"
-    smoke.run("pcb", "drc", "--format", "json", "-o", str(out / "drc.json"), str(smoke.board))
-    if (out / "drc.json").is_file():
-        json.loads((out / "drc.json").read_text(encoding="utf-8"))
-    smoke.expect_file(out / "drc.json", "pcb drc")
-    smoke.run("pcb", "export", "step", "-o", str(out / "board.step"), str(smoke.board))
-    smoke.expect_file(out / "board.step", "pcb export step")
-    smoke.run("pcb", "export", "svg", "-l", "F.Cu,Edge.Cuts", "-o", str(out / "board.svg"), str(smoke.board))
-    smoke.expect_file(out / "board.svg", "pcb export svg")
-    smoke.run("pcb", "export", "gerbers", "-o", str(out / "gerbers") + os.sep, str(smoke.board))
-    smoke.expect_file(out / "gerbers", "pcb export gerbers")
-    smoke.run("sch", "export", "netlist", "-o", str(out / "board.net"), str(smoke.work / "smoke.kicad_sch"))
-    smoke.expect_file(out / "board.net", "sch export netlist")
+    smoke.run("pcb", "drc", "--format", "json", "-o", str(smoke.out / "drc.json"), str(smoke.board))
+    if (smoke.out / "drc.json").is_file():
+        json.loads((smoke.out / "drc.json").read_text(encoding="utf-8"))
+    else:
+        smoke.failures.append("pcb drc wrote no report")
+    smoke.export("step", "board.step")
+    smoke.export("gerbers", "gerbers/")
+    smoke.export("drill", "drill/")
+    smoke.export("pos", "board.pos", "--format", "ascii", "--units", "mm")
+    smoke.export("svg", "board.svg", "-l", "F.Cu,Edge.Cuts")
+    smoke.export("pdf", "board.pdf", "-l", "F.Cu,Edge.Cuts", "--mode-single")
+    if args.installed == "kicode":
+        smoke.export("netlist", "board.net", of=smoke.work / "smoke.kicad_sch")
+    else:
+        smoke.schematic_missing()
     help_text = smoke.run("api-server", "--help").stdout
     if "--socket" not in help_text:
         smoke.failures.append("kicad-cli api-server --help lists no --socket")

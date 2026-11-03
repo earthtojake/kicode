@@ -1,12 +1,25 @@
-# Build kicad-cli-bin's wheels of one KiCad nightly, smoke-test each on its platform, and publish them.
+# Build kicode's wheels of one KiCad nightly, smoke-test them on every platform, and publish them.
+#
+# kicode is three distributions of one version: kicode-pcb (a wheel per platform: the import package
+# kicode, with kicad-cli, KiCad's board support, every library it links, and KiPy), kicode-sch (a wheel per
+# platform: KiCad's schematic support, installed into kicode-pcb's folder) and kicode (one py3-none-any
+# wheel that requires both: what everyone installs). No wheel of 100 MB or more is ever made or uploaded.
 #
 # Daily, it follows KiCad: the newest commit KiCad has published a macOS and a Windows nightly of is
-# built and, when every platform passes, published; a commit already released is skipped in seconds.
-# Dispatched by hand, it builds a named KiCad commit (or the newest) and publishes only when asked. macOS and Windows repackage KiCad's own builds of the commit; Linux builds the
-# same commit from source on Debian 12. Each wheel is smoke-tested where it will run (Linux also in bare
-# roots with no KiCad, GTK or X11 installed). With `publish`, every wheel, the matched kicad-python
-# wheel and the corresponding source go to a GitHub Release named for the version, whose page is the
-# find-links index (README.md).
+# built and, when every platform passes, published as a GitHub prerelease; a commit already released is
+# skipped in seconds. Dispatched by hand, it builds a named KiCad commit (or the newest) and publishes only
+# when asked. macOS and Windows repackage KiCad's own builds of the commit; Linux builds the same commit
+# from source on Debian 12. Each platform's wheels are smoke-tested where they will run: kicode-pcb alone,
+# then kicode (Linux also in bare roots with no KiCad, GTK or X11 installed). With `publish`, every wheel
+# and the corresponding source go to a GitHub Release named for the version, whose page is the find-links
+# index (README.md).
+#
+# With `pypi` (dispatch only, never the schedule) it promotes a version to PyPI: the wheels of its GitHub
+# Release, published already or by the same run with `publish`, unchanged. Without `publish` it builds
+# nothing. Each distribution uploads from its own job and environment (pypi-pcb, pypi-sch, pypi): PyPI
+# takes one pending trusted publisher per repository, workflow and environment, so three new projects
+# need three environments. kicode-pcb goes first and kicode last, so PyPI never lists a kicode whose
+# parts it lacks.
 #
 # A push or pull request runs only `check`: the scripts parse.
 name: Build
@@ -19,11 +32,15 @@ on:
         required: false
         default: ""
       kicad_python:
-        description: "kicad-python commit to build the matched client from"
+        description: "kicad-python commit or branch whose KiPy the wheels carry"
         required: false
-        default: "87b945a0"
+        default: "main"
       publish:
         description: "Publish the GitHub Release"
+        type: boolean
+        default: false
+      pypi:
+        description: "Upload the version's GitHub Release to PyPI (with publish, the one this run makes)"
         type: boolean
         default: false
   schedule:
@@ -49,14 +66,14 @@ jobs:
           persist-credentials: false
       - name: The scripts parse
         run: |
-          python3 -m py_compile scripts/*.py tests/*.py src/kicad_cli_bin/*.py
+          python3 -m py_compile scripts/*.py tests/*.py src/kicode/*.py
           for script in scripts/*.sh; do bash -n "$script"; done
 
   resolve:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     outputs:
-      fresh: ${{ steps.fresh.outputs.fresh }}
+      build: ${{ steps.build.outputs.build }}
       commit: ${{ steps.nightly.outputs.commit }}
       kicad_version: ${{ steps.nightly.outputs.kicad_version }}
       kicad_full_version: ${{ steps.nightly.outputs.kicad_full_version }}
@@ -73,32 +90,44 @@ jobs:
         env:
           COMMIT: ${{ inputs.commit }}
         run: python3 scripts/resolve_nightly.py ${COMMIT:+--commit "$COMMIT"}
-      # A scheduled run builds only a version not yet released; a dispatch always builds.
-      - name: Already released?
-        id: fresh
+      # A scheduled run builds only a version not yet released; a dispatch builds unless it only promotes.
+      - name: Build?
+        id: build
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.nightly.outputs.tag }}
+          PUBLISH: ${{ inputs.publish }}
+          PYPI: ${{ inputs.pypi }}
         run: |
           if [ "${{ github.event_name }}" = schedule ] && gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "$TAG is released already"; echo fresh=false >> "$GITHUB_OUTPUT"
+            echo "$TAG is released already"; echo build=false >> "$GITHUB_OUTPUT"
+          elif [ "$PYPI" = true ] && [ "$PUBLISH" != true ]; then
+            echo "promoting $TAG's release to PyPI: nothing to build"; echo build=false >> "$GITHUB_OUTPUT"
           else
-            echo fresh=true >> "$GITHUB_OUTPUT"
+            echo build=true >> "$GITHUB_OUTPUT"
           fi
       - name: KiCad's notices at the commit
-        if: steps.fresh.outputs.fresh == 'true'
+        if: steps.build.outputs.build == 'true'
         run: python3 scripts/kicad_licenses.py "${{ steps.nightly.outputs.commit }}" licenses
       - uses: actions/upload-artifact@v7
-        if: steps.fresh.outputs.fresh == 'true'
+        if: steps.build.outputs.build == 'true'
         with:
           name: kicad-licenses
           path: licenses/
+      - name: kicode's own wheel
+        if: steps.build.outputs.build == 'true'
+        run: python3 scripts/make_wheel.py --meta --version "${{ steps.nightly.outputs.version }}" --out dist
+      - uses: actions/upload-artifact@v7
+        if: steps.build.outputs.build == 'true'
+        with:
+          name: wheel-any
+          path: dist/*.whl
 
-  # The KiPy the release pairs with this KiCad: its API changes with the nightly, and the matched client
-  # is not on PyPI. Pure Python, so one wheel serves every platform.
+  # The KiPy the wheels carry (scripts/vendor_kipy.py): its API changes with the nightly, and the matched client
+  # is not on PyPI. Its build generates the protobuf code; the wheel is only an input, never published.
   kicad-python:
     needs: resolve
-    if: needs.resolve.outputs.fresh == 'true'
+    if: needs.resolve.outputs.build == 'true'
     runs-on: ubuntu-latest
     outputs:
       commit: ${{ steps.build.outputs.commit }}
@@ -107,26 +136,13 @@ jobs:
       - name: Build kicad-python at the commit
         id: build
         env:
-          # A scheduled build pairs the newest client; the smoke tests' API round trip fails a mismatch.
           KIPY: ${{ inputs.kicad_python || 'main' }}
-          NIGHTLY: ${{ needs.resolve.outputs.version }}
         run: |
           git clone --quiet https://gitlab.com/kicad/code/kicad-python.git kicad-python
           git -C kicad-python checkout --quiet "$KIPY"
           git -C kicad-python submodule update --quiet --init --recursive
           echo "commit=$(git -C kicad-python rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          # Every build of kicad-python's main says the same version (0.9.0.dev0), which installers cache
-          # by: stamp this one with the nightly's date (0.9.0.dev20261031) so each release's is its own.
-          base=$(sed -n 's/^version = "\(.*\)"$/\1/p' kicad-python/pyproject.toml | head -1)
-          stamped="${base%%.dev*}.dev${NIGHTLY##*.dev}"
-          sed -i "s/^version = \"$base\"$/version = \"$stamped\"/" kicad-python/pyproject.toml
-          grep -q "^version = \"$stamped\"$" kicad-python/pyproject.toml
-          echo "kicad-python $base -> $stamped"
           uv build --wheel --out-dir dist kicad-python
-          # Its poetry build script (which generates the protobuf code) tags the wheel for the building
-          # interpreter and platform; the wheel is pure Python, so it is retagged for every one.
-          ! unzip -l dist/*.whl | grep -E '\.(so|pyd|dylib)$'
-          uvx --from wheel wheel tags --python-tag py3 --abi-tag none --platform-tag any --remove dist/*.whl
           ls -la dist
       - uses: actions/upload-artifact@v7
         with:
@@ -137,6 +153,9 @@ jobs:
     needs: [resolve, kicad-python]
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -150,31 +169,46 @@ jobs:
         with:
           name: kicad-python
           path: kipy
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-any
+          path: any
       - name: Download KiCad's macOS nightly
         env:
           URL: ${{ needs.resolve.outputs.macos_url }}
         run: curl -fsSL --retry 5 -o kicad.dmg "$URL"
       - name: Stage kicad-cli (arm64)
         run: scripts/stage_macos.sh kicad.dmg arm64 stage
-      - name: Make the wheel
+      - name: KiPy into the package
+        run: python3 scripts/vendor_kipy.py kipy/*.whl stage --commit "${{ needs.kicad-python.outputs.commit }}"
+      - name: Make the wheels
         run: |
-          python3 scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
-            --platform macosx_14_0_arm64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
-            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
-      - name: Smoke test
+          python3 scripts/make_wheel.py --staged stage --version "$VERSION" --platform macosx_14_0_arm64 \
+            --kicad-version "$KICAD_VERSION" --commit "${{ needs.resolve.outputs.commit }}" --kicad-licenses licenses --out dist
+          for wheel in dist/*.whl; do
+            size=$(wc -c < "$wheel"); echo "$wheel: $size bytes"
+            [ "$size" -lt 100000000 ] || { echo "::error::$wheel is $size bytes: PyPI takes no file of 100 MB or more"; exit 1; }
+          done
+      - name: Smoke tests (kicode-pcb alone, kicode, kicode-pcb again)
         run: |
           uv venv --python 3.12 smoke
-          uv pip install --python smoke dist/*.whl kipy/*.whl
-          smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+          uv pip install --python smoke dist/kicode_pcb-*.whl
+          smoke/bin/python tests/smoke.py --installed kicode-pcb --expect-version "$KICAD_VERSION"
+          uv pip install --python smoke any/kicode-*.whl dist/kicode_sch-*.whl
+          smoke/bin/python tests/smoke.py --installed kicode --expect-version "$KICAD_VERSION"
+          uv pip uninstall --python smoke kicode kicode-sch
+          smoke/bin/python tests/smoke.py --installed kicode-pcb --no-api --expect-version "$KICAD_VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-macos-arm64
           path: dist/*.whl
 
-  # The wheel says macOS 14: run it on 14, not only on the runner that built it.
+  # The wheels say macOS 14: run them on 14, not only on the runner that built them.
   macos-14:
-    needs: [resolve, macos, kicad-python]
+    needs: [resolve, macos]
     runs-on: macos-14
+    env:
+      KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -186,14 +220,16 @@ jobs:
           path: dist
       - uses: actions/download-artifact@v8
         with:
-          name: kicad-python
-          path: kipy
-      - name: Smoke test on macOS 14
+          name: wheel-any
+          path: any
+      - name: Smoke tests on macOS 14
         run: |
           sw_vers
           uv venv --python 3.12 smoke
-          uv pip install --python smoke dist/*.whl kipy/*.whl
-          smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+          uv pip install --python smoke dist/kicode_pcb-*.whl
+          smoke/bin/python tests/smoke.py --installed kicode-pcb --expect-version "$KICAD_VERSION"
+          uv pip install --python smoke any/kicode-*.whl dist/kicode_sch-*.whl
+          smoke/bin/python tests/smoke.py --installed kicode --expect-version "$KICAD_VERSION"
 
   windows:
     needs: [resolve, kicad-python]
@@ -202,6 +238,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -215,30 +254,42 @@ jobs:
         with:
           name: kicad-python
           path: kipy
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheel-any
+          path: any
       - name: Download KiCad's Windows nightly
         env:
           URL: ${{ needs.resolve.outputs.windows_url }}
         run: curl -fsSL --retry 5 -o kicad.exe "$URL"
       - name: Stage kicad-cli
         run: python scripts/stage_windows.py kicad.exe stage
-      - name: Make the wheel
+      - name: KiPy into the package
+        run: python scripts/vendor_kipy.py kipy/*.whl stage --commit "${{ needs.kicad-python.outputs.commit }}"
+      - name: Make the wheels
         run: |
-          python scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
-            --platform win_amd64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
-            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
-      - name: Smoke test
+          python scripts/make_wheel.py --staged stage --version "$VERSION" --platform win_amd64 \
+            --kicad-version "$KICAD_VERSION" --commit "${{ needs.resolve.outputs.commit }}" --kicad-licenses licenses --out dist
+          for wheel in dist/*.whl; do
+            size=$(wc -c < "$wheel"); echo "$wheel: $size bytes"
+            [ "$size" -lt 100000000 ] || { echo "::error::$wheel is $size bytes: PyPI takes no file of 100 MB or more"; exit 1; }
+          done
+      - name: Smoke tests (kicode-pcb alone, kicode, kicode-pcb again)
         run: |
           uv venv --python 3.12 smoke
-          uv pip install --python smoke/Scripts/python.exe dist/*.whl kipy/*.whl
-          smoke/Scripts/python.exe tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+          uv pip install --python smoke/Scripts/python.exe dist/kicode_pcb-*.whl
+          smoke/Scripts/python.exe tests/smoke.py --installed kicode-pcb --expect-version "$KICAD_VERSION"
+          uv pip install --python smoke/Scripts/python.exe any/kicode-*.whl dist/kicode_sch-*.whl
+          smoke/Scripts/python.exe tests/smoke.py --installed kicode --expect-version "$KICAD_VERSION"
+          uv pip uninstall --python smoke/Scripts/python.exe kicode kicode-sch
+          smoke/Scripts/python.exe tests/smoke.py --installed kicode-pcb --no-api --expect-version "$KICAD_VERSION"
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-windows-x86_64
           path: dist/*.whl
 
   linux:
-    needs: resolve
-    if: needs.resolve.outputs.fresh == 'true'
+    needs: [resolve, kicad-python]
     runs-on: ubuntu-latest
     container: debian:12
     timeout-minutes: 330
@@ -246,6 +297,8 @@ jobs:
       CCACHE_DIR: /ccache
       CCACHE_MAXSIZE: 4G
       KICAD_FULL_VERSION: ${{ needs.resolve.outputs.kicad_full_version }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
       - name: Tools the steps below need in a bare container
         run: apt-get update -q && apt-get install -y -q --no-install-recommends git ca-certificates zstd python3
@@ -255,9 +308,13 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: kicad-licenses
-          path: licenses/kicad
-      # Each nightly is a new commit, so a build reuses the newest earlier one's objects; saved even when
-      # the build fails, so the next attempt starts where this one stopped.
+          path: licenses
+      - uses: actions/download-artifact@v8
+        with:
+          name: kicad-python
+          path: kipy
+      # Each nightly is a new commit, so a build reuses the newest earlier one's objects (wxWidgets' too);
+      # saved even when the build fails, so the next attempt starts where this one stopped.
       - uses: actions/cache/restore@v4
         with:
           path: /ccache
@@ -270,14 +327,18 @@ jobs:
         with:
           path: /ccache
           key: ccache-linux-${{ needs.resolve.outputs.commit }}-${{ github.run_id }}
-      - name: Make the wheel
+      - name: KiPy into the package
+        run: python3 scripts/vendor_kipy.py kipy/*.whl stage --commit "${{ needs.kicad-python.outputs.commit }}"
+      - name: Make the wheels
         run: |
-          mkdir -p licenses/debian && cp stage/licenses/* licenses/debian/
-          python3 scripts/make_wheel.py --staged stage --version "${{ needs.resolve.outputs.version }}" \
-            --platform manylinux_2_36_x86_64 --kicad-version "${{ needs.resolve.outputs.kicad_version }}" \
-            --commit "${{ needs.resolve.outputs.commit }}" --licenses licenses --out dist
+          python3 scripts/make_wheel.py --staged stage --version "$VERSION" --platform manylinux_2_36_x86_64 \
+            --kicad-version "$KICAD_VERSION" --commit "${{ needs.resolve.outputs.commit }}" --kicad-licenses licenses --out dist
+          for wheel in dist/*.whl; do
+            size=$(wc -c < "$wheel"); echo "$wheel: $size bytes"
+            [ "$size" -lt 100000000 ] || { echo "::error::$wheel is $size bytes: PyPI takes no file of 100 MB or more"; exit 1; }
+          done
       - name: The bundled libraries' source
-        run: scripts/linux_sources.sh stage/sources.txt "dist-sources/kicad-cli-bin-${{ needs.resolve.outputs.version }}-linux-bundled-sources.tar"
+        run: scripts/linux_sources.sh stage/sources.txt "dist-sources/kicode-$VERSION-linux-bundled-sources.tar" stage/upstream/*
       - uses: actions/upload-artifact@v7
         with:
           name: wheel-linux-x86_64
@@ -288,15 +349,17 @@ jobs:
           path: dist-sources/
           compression-level: 0
 
-  # The Linux wheel in roots that have none of what it bundles: no KiCad, GTK, X11 or OpenGL.
+  # The Linux wheels in roots that have none of what they bundle: no KiCad, GTK, X11 or OpenGL.
   linux-smoke:
-    needs: [resolve, linux, kicad-python]
+    needs: [resolve, linux]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         image: ["python:3.12-slim-bookworm", "ubuntu:24.04", "fedora:42"]
     container: ${{ matrix.image }}
+    env:
+      KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
       - name: Python and the checkout's tools
         run: |
@@ -314,15 +377,23 @@ jobs:
           path: dist
       - uses: actions/download-artifact@v8
         with:
-          name: kicad-python
-          path: kipy
-      - name: Smoke test in ${{ matrix.image }}
+          name: wheel-any
+          path: any
+      - name: Smoke tests in ${{ matrix.image }} (kicode-pcb alone, kicode, kicode-pcb again)
+        shell: bash
         run: |
+          set -euo pipefail
           python3 -m venv /smoke
-          /smoke/bin/pip install -q dist/*.whl kipy/*.whl
-          cli=$(/smoke/bin/python -m kicad_cli_bin)
-          ! ldd "$cli" | grep "not found"
-          /smoke/bin/python tests/smoke.py --expect-version "${{ needs.resolve.outputs.kicad_version }}"
+          /smoke/bin/pip install -q dist/kicode_pcb-*.whl
+          cli=$(/smoke/bin/python -m kicode)
+          unresolved() { for elf in "$@"; do ldd "$elf" | grep "not found" && return 0; done; return 1; }
+          if unresolved "$cli" "$(dirname "$cli")"/_*.kiface; then echo "::error::kicode-pcb links what it lacks"; exit 1; fi
+          /smoke/bin/python tests/smoke.py --installed kicode-pcb --expect-version "$KICAD_VERSION"
+          /smoke/bin/pip install -q any/kicode-*.whl dist/kicode_sch-*.whl
+          if unresolved "$(dirname "$cli")"/_*.kiface; then echo "::error::kicode-sch links what it lacks"; exit 1; fi
+          /smoke/bin/python tests/smoke.py --installed kicode --expect-version "$KICAD_VERSION"
+          /smoke/bin/pip uninstall -y -q kicode kicode-sch
+          /smoke/bin/python tests/smoke.py --installed kicode-pcb --no-api --expect-version "$KICAD_VERSION"
 
   publish:
     needs: [resolve, kicad-python, macos, macos-14, windows, linux, linux-smoke]
@@ -336,10 +407,6 @@ jobs:
           pattern: wheel-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v8
-        with:
-          name: kicad-python
-          path: dist
       - uses: actions/download-artifact@v8
         with:
           name: linux-sources
@@ -358,17 +425,108 @@ jobs:
           KIPY: ${{ needs.kicad-python.outputs.commit }}
         run: |
           ls -la dist sources
+          test "$(ls dist/*.whl | wc -l)" -eq 7 || { echo "::error::expected seven wheels"; exit 1; }
+          for wheel in dist/*.whl; do
+            [ "$(wc -c < "$wheel")" -lt 100000000 ] || { echo "::error::$wheel is 100 MB or more"; exit 1; }
+          done
           cat > notes.md <<EOF
-          KiCad nightly \`$FULL\`, commit [\`$COMMIT\`](https://gitlab.com/kicad/code/kicad/-/commit/$COMMIT).
+          KiCad nightly \`$FULL\`, commit [\`$COMMIT\`](https://gitlab.com/kicad/code/kicad/-/commit/$COMMIT), with KiPy
+          (kicad-python) [\`${KIPY:0:10}\`](https://gitlab.com/kicad/code/kicad-python/-/commit/$KIPY) as the \`kicode\` package.
 
           \`\`\`bash
-          uv pip install "kicad-cli-bin==${TAG#v}" --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/$TAG
+          uv pip install "kicode==${TAG#v}" --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/$TAG
           \`\`\`
 
-          The kicad-python wheel is the client matched to this KiCad, built from kicad-python
-          [\`${KIPY:0:10}\`](https://gitlab.com/kicad/code/kicad-python/-/commit/$KIPY). The source attached: KiCad's at the
-          commit, and the Debian source package of every library the Linux wheel bundles.
+          Three distributions of one version: \`kicode\` (this wheel requires the other two), \`kicode-pcb\` (kicad-cli,
+          KiCad's board support and KiPy: the \`kicode\` import package; a wheel per platform) and \`kicode-sch\` (KiCad's
+          schematic support, installed into kicode-pcb's folder; a wheel per platform). The source attached: KiCad's at
+          the commit, and for the Linux wheels the Debian source package of every library they bundle and wxWidgets'
+          release tarball.
           EOF
           gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
-            --title "kicad-cli-bin ${TAG#v}" --notes-file notes.md --prerelease \
+            --title "kicode ${TAG#v}" --notes-file notes.md --prerelease \
             dist/*.whl sources/*
+
+  # Promotion to PyPI: the release's wheels, unchanged, one distribution per job and environment.
+  pypi-pcb:
+    needs: [resolve, publish]
+    if: >-
+      always() && github.event_name == 'workflow_dispatch' && inputs.pypi && needs.resolve.result == 'success' &&
+      (needs.publish.result == 'success' || (!inputs.publish && needs.publish.result == 'skipped'))
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-pcb
+      url: https://pypi.org/project/kicode-pcb/${{ needs.resolve.outputs.version }}/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: kicode-pcb's wheels from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "kicode_pcb-$VERSION-*.whl" --dir dist
+          for platform in macosx_14_0_arm64 win_amd64 manylinux_2_36_x86_64; do
+            test -f "dist/kicode_pcb-$VERSION-py3-none-$platform.whl" || { echo "::error::$TAG has no kicode-pcb wheel for $platform"; exit 1; }
+          done
+          for wheel in dist/*.whl; do
+            size=$(wc -c < "$wheel"); echo "$wheel: $size bytes"
+            [ "$size" -lt 100000000 ] || { echo "::error::$wheel is $size bytes: PyPI takes no file of 100 MB or more"; exit 1; }
+          done
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  pypi-sch:
+    needs: [resolve, pypi-pcb]
+    if: always() && needs.pypi-pcb.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-sch
+      url: https://pypi.org/project/kicode-sch/${{ needs.resolve.outputs.version }}/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: kicode-sch's wheels from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "kicode_sch-$VERSION-*.whl" --dir dist
+          for platform in macosx_14_0_arm64 win_amd64 manylinux_2_36_x86_64; do
+            test -f "dist/kicode_sch-$VERSION-py3-none-$platform.whl" || { echo "::error::$TAG has no kicode-sch wheel for $platform"; exit 1; }
+          done
+          for wheel in dist/*.whl; do
+            size=$(wc -c < "$wheel"); echo "$wheel: $size bytes"
+            [ "$size" -lt 100000000 ] || { echo "::error::$wheel is $size bytes: PyPI takes no file of 100 MB or more"; exit 1; }
+          done
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  pypi:
+    needs: [resolve, pypi-sch]
+    if: always() && needs.pypi-sch.result == 'success'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/kicode/${{ needs.resolve.outputs.version }}/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: kicode's wheel from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern "kicode-$VERSION-py3-none-any.whl" --dir dist
+          test -f "dist/kicode-$VERSION-py3-none-any.whl" || { echo "::error::$TAG has no kicode wheel"; exit 1; }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

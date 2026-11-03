@@ -17,7 +17,7 @@ API = "https://gitlab.com/api/v4/projects/kicad%2Fcode%2Fkicad/repository"
 
 
 def fetch(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": "kicad-cli-bin"})
+    request = urllib.request.Request(url, headers={"User-Agent": "kicode"})
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read()
 

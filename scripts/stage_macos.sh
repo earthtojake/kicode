@@ -3,13 +3,18 @@
 #
 #   scripts/stage_macos.sh <kicad.dmg> <arm64|x86_64> <out dir>
 #
-# <out dir>/kicad_cli_bin/kicad/Contents/ gets the command line and only what it loads: MacOS/kicad-cli,
-# the kifaces and the 3D plugins under PlugIns/, the libraries they link under Frameworks/ (followed
-# through @rpath, @loader_path and @executable_path). No SharedSupport: a run reads none of it (DRC,
-# every export, the netlist and the render run the same without it). Every Mach-O is thinned to the one
-# architecture with lipo, which keeps each slice's own signature: nothing is re-signed, and KiCad's
-# signatures are verified before the script ends. Kept under Contents/MacOS so the system still finds
-# PlugIns/ beside it, as in the bundle.
+# <out dir>/kicode/_kicad/Contents/ gets the command line and only what it loads: MacOS/kicad-cli, the
+# kifaces and the 3D plugins under PlugIns/, the libraries they link under Frameworks/ (followed through
+# @rpath, @loader_path and @executable_path). Three kifaces only: pcbnew's (every pcb command and the API
+# server), eeschema's (every sch and sym command) and cvpcb's (which eeschema's netlist work calls on);
+# GerbView's, the drawing sheet editor's and the calculator's are left out. No SharedSupport: a run reads
+# none of it (DRC, every export, the netlist and the render run the same without it). Every Mach-O is
+# thinned to the one architecture with lipo, which keeps each slice's own signature: nothing is re-signed,
+# and KiCad's signatures are verified before the script ends. Kept under Contents/MacOS so the system
+# still finds PlugIns/ beside it, as in the bundle.
+# <out dir>/schematic/files.txt lists the files only the schematic kifaces need (the two kifaces and every
+# library nothing else staged links), relative to <out dir>/kicode/: the kicode-sch wheel carries
+# them, and the kicode-pcb wheel everything else (make_wheel.py).
 # No .app, no crash handler, no GUI binaries. One file of ours: Contents/Info.plist, marking kicad-cli
 # background-only, without which macOS puts a Dock icon up for every run (it registers a Cocoa program
 # as a foreground app; KiCad's own kicad-cli shows the KiCad icon). kicad-cli's signature binds no
@@ -27,9 +32,9 @@ hdiutil attach -quiet -nobrowse -readonly -noautoopen -mountpoint "$mount" "$dmg
 app="$mount/KiCad/KiCad.app/Contents"
 test -x "$app/MacOS/kicad-cli" || { echo "no KiCad.app/Contents/MacOS/kicad-cli in $dmg" >&2; exit 1; }
 
-dest="$out/kicad_cli_bin/kicad/Contents"
-rm -rf "$out/kicad_cli_bin/kicad"
-mkdir -p "$dest/MacOS" "$dest/Frameworks" "$dest/PlugIns/3d"
+dest="$out/kicode/_kicad/Contents"
+rm -rf "$out/kicode/_kicad" "$out/schematic"
+mkdir -p "$dest/MacOS" "$dest/Frameworks" "$dest/PlugIns/3d" "$out/schematic"
 
 # Copy one Mach-O, thinned to $arch (a file with only that slice is copied as it is).
 thin() {
@@ -41,27 +46,55 @@ thin() {
     fi
 }
 
-# Every kiface: kicad-cli loads them by subcommand (sch export netlist loads cvpcb's, gerber gerbview's).
-roots=(MacOS/kicad-cli PlugIns/_pcbnew.kiface PlugIns/_eeschema.kiface PlugIns/_cvpcb.kiface
-       PlugIns/_gerbview.kiface PlugIns/_pl_editor.kiface PlugIns/_pcb_calculator.kiface
+board=(MacOS/kicad-cli PlugIns/_pcbnew.kiface
        PlugIns/3d/libs3d_plugin_oce.so PlugIns/3d/libs3d_plugin_vrml.so PlugIns/3d/libs3d_plugin_idf.so)
-for rel in "${roots[@]}"; do thin "$app/$rel" "$dest/$rel"; done
+schematic=(PlugIns/_eeschema.kiface PlugIns/_cvpcb.kiface)
+for rel in "${board[@]}" "${schematic[@]}"; do thin "$app/$rel" "$dest/$rel"; done
 
-# The libraries they link, transitively: every @rpath/@loader_path/@executable_path name resolves to a
-# file of the same name in Frameworks (the bundle's only rpath). Copied under the name they are linked
-# by, so the symlinked aliases in the bundle are never needed (a wheel holds no symlinks).
-queue=("${roots[@]}")
+# The libraries a staged Mach-O links: every @rpath/@loader_path/@executable_path name resolves to a file of
+# the same name in Frameworks (the bundle's only rpath).
+links() {
+    otool -L "$dest/$1" | tail -n +2 | awk '{print $1}' | grep -E '^@(rpath|loader_path|executable_path)/' |
+        sed 's|.*/|Frameworks/|' || true
+}
+
+# Everything the roots load, transitively, copied under the name it is linked by, so the symlinked aliases
+# in the bundle are never needed (a wheel holds no symlinks).
+queue=("${board[@]}" "${schematic[@]}")
 while [ ${#queue[@]} -gt 0 ]; do
     rel=${queue[0]}; queue=("${queue[@]:1}")
-    while read -r dep; do
-        name=${dep##*/}
-        [ -e "$dest/Frameworks/$name" ] && continue
-        src="$app/Frameworks/$name"
+    for dep in $(links "$rel"); do
+        [ -e "$dest/$dep" ] && continue
+        src="$app/$dep"
         test -e "$src" || { echo "$rel links $dep, not in Frameworks" >&2; exit 1; }
-        thin "$(cd "$(dirname "$src")" && realpath "$name")" "$dest/Frameworks/$name"
-        queue+=("Frameworks/$name")
-    done < <(otool -arch "$arch" -L "$dest/$rel" | tail -n +2 | awk '{print $1}' | grep -E '^@(rpath|loader_path|executable_path)/' || true)
+        thin "$(cd "$(dirname "$src")" && realpath "$(basename "$src")")" "$dest/$dep"
+        queue+=("$dep")
+    done
 done
+
+# What a set of staged roots loads, transitively, the roots included: one sorted path per line.
+closure() {
+    local list rel dep
+    list=$(mktemp)
+    printf '%s\n' "$@" > "$list"
+    local queue=("$@")
+    while [ ${#queue[@]} -gt 0 ]; do
+        rel=${queue[0]}; queue=("${queue[@]:1}")
+        for dep in $(links "$rel"); do
+            grep -qxF "$dep" "$list" && continue
+            echo "$dep" >> "$list"
+            queue+=("$dep")
+        done
+    done
+    sort -u "$list"
+    rm -f "$list"
+}
+closure "${board[@]}" > "$out/schematic/board.txt"
+closure "${schematic[@]}" > "$out/schematic/all.txt"
+comm -13 "$out/schematic/board.txt" "$out/schematic/all.txt" | sed 's|^|_kicad/Contents/|' > "$out/schematic/files.txt"
+orphans=$(cd "$dest" && find . -type f | sed 's|^\./||' | sort | comm -23 - <(sort -u "$out/schematic/board.txt" "$out/schematic/all.txt"))
+test -z "$orphans" || { echo "staged, but nothing loads: $orphans" >&2; exit 1; }
+rm "$out/schematic/board.txt" "$out/schematic/all.txt"
 
 # KiCad's signatures, intact on every thinned binary.
 find "$dest" -type f \( -name kicad-cli -o -name '*.dylib' -o -name '*.kiface' -o -name '*.so' \) -print0 |
@@ -74,7 +107,7 @@ cat > "$dest/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>dev.texttocad.kicad-cli-bin</string>
+	<string>dev.texttocad.kicode</string>
 	<key>CFBundleName</key>
 	<string>kicad-cli</string>
 	<key>CFBundleExecutable</key>
@@ -87,4 +120,5 @@ cat > "$dest/Info.plist" <<'PLIST'
 </plist>
 PLIST
 plutil -lint -s "$dest/Info.plist"
-echo "staged $(find "$dest" -type f | wc -l | tr -d ' ') files, $(du -sh "$dest" | cut -f1), in $dest"
+echo "staged $(find "$dest" -type f | wc -l | tr -d ' ') files, $(du -sh "$dest" | cut -f1), in $dest;" \
+     "schematic only: $(tr '\n' ' ' < "$out/schematic/files.txt")"
