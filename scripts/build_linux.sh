@@ -266,4 +266,12 @@ for side in board schematic; do
 done
 echo "staged $(find "$kicad" -type f | wc -l) files, $(du -sh "$kicad" | cut -f1), from $(sort -u "$work/packages" | wc -l)" \
      "Debian packages ($(wc -l < "$out/sources.txt") sources) in $kicad; schematic only: $(tr '\n' ' ' < "$out/schematic/files.txt")"
+# What the wheels' size comes from: the largest files, and what each staged ELF links directly.
+echo "the largest staged files (bytes):"
+find "$kicad" -type f -printf '%s %P\n' | sort -rn | head -40
+echo "what each staged ELF links:"
+for elf in "$bin"/* "$plugins"/* "$lib"/*; do
+    [ -f "$elf" ] || continue
+    echo "  $(basename "$elf"): $(objdump -p "$elf" | awk '/NEEDED/ {print $2}' | tr '\n' ' ')"
+done
 rm -rf "$work"

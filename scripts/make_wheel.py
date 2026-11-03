@@ -137,9 +137,14 @@ class Wheel:
         self.zip.close()
         size = self.part.stat().st_size
         if size >= LIMIT:
+            with zipfile.ZipFile(self.part) as written:
+                largest = sorted(written.infolist(), key=lambda item: -item.compress_size)[:30]
             self.part.unlink()
             raise SystemExit(f"{self.path.name} would be {size:,} bytes ({size / 1e6:.1f} MB): PyPI takes no file "
-                             f"of {LIMIT / 1e6:.0f} MB or more, so it is not written")
+                             f"of {LIMIT / 1e6:.0f} MB or more, so it is not written. Its largest entries, "
+                             "compressed (uncompressed), in MB:\n"
+                             + "\n".join(f"  {item.compress_size / 1e6:6.2f} ({item.file_size / 1e6:6.2f}) {item.filename}"
+                                         for item in largest))
         self.part.replace(self.path)
         print(f"wrote {self.path} ({size / 1e6:.1f} MB, {size:,} bytes; limit {LIMIT / 1e6:.0f} MB)")
         return self.path
