@@ -28,7 +28,9 @@ build=${KICAD_BUILD:-/tmp/kicad-build}
 export DEBIAN_FRONTEND=noninteractive
 
 # KiCad's own dependency list (install-deps.sh at the commit), as Debian 12 names it, without the
-# documentation and Python test tools; plus the build's own tools.
+# documentation and Python test tools; the shader compilers its render hardware interface needs at build
+# time (glslang-tools, spirv-tools; not in install-deps.sh); plus the build's own tools. No Vulkan headers:
+# that backend is optional and a command line never draws on a GPU.
 apt-get update -q
 apt-get install -y -q --no-install-recommends \
     build-essential cmake ninja-build pkg-config ccache git ca-certificates curl file patchelf python3 \
@@ -38,7 +40,7 @@ apt-get install -y -q --no-install-recommends \
     libocct-visualization-dev libocct-foundation-dev libocct-ocaf-dev libgit2-dev libsecret-1-dev \
     libboost-all-dev libcurl4-openssl-dev libngspice0-dev unixodbc-dev libsqlite3-dev libspnav-dev libnng-dev \
     libprotobuf-dev protobuf-compiler libzint-dev libpoppler-dev libpoppler-glib-dev libwayland-dev \
-    libharfbuzz-dev libfreetype-dev libfontconfig-dev shared-mime-info
+    libharfbuzz-dev libfreetype-dev libfontconfig-dev shared-mime-info glslang-tools spirv-tools
 
 if [ ! -f "$src/CMakeLists.txt" ]; then
     mkdir -p "$src"
