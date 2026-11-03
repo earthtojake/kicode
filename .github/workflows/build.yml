@@ -1,7 +1,8 @@
 # Build kicad-cli-bin's wheels of one KiCad nightly, smoke-test each on its platform, and publish them.
 #
-# Dispatched by hand: a KiCad commit, or none for the newest commit KiCad has published a macOS and a
-# Windows nightly of. macOS and Windows repackage KiCad's own builds of the commit; Linux builds the
+# Daily, it follows KiCad: the newest commit KiCad has published a macOS and a Windows nightly of is
+# built and, when every platform passes, published; a commit already released is skipped in seconds.
+# Dispatched by hand, it builds a named KiCad commit (or the newest) and publishes only when asked. macOS and Windows repackage KiCad's own builds of the commit; Linux builds the
 # same commit from source on Debian 12. Each wheel is smoke-tested where it will run (Linux also in bare
 # roots with no KiCad, GTK or X11 installed). With `publish`, every wheel, the matched kicad-python
 # wheel and the corresponding source go to a GitHub Release named for the version, whose page is the
@@ -25,6 +26,8 @@ on:
         description: "Publish the GitHub Release"
         type: boolean
         default: false
+  schedule:
+    - cron: "17 6 * * *"
   push:
     branches: [main]
   pull_request:
@@ -38,7 +41,7 @@ concurrency:
 
 jobs:
   check:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -50,9 +53,10 @@ jobs:
           for script in scripts/*.sh; do bash -n "$script"; done
 
   resolve:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     outputs:
+      fresh: ${{ steps.fresh.outputs.fresh }}
       commit: ${{ steps.nightly.outputs.commit }}
       kicad_version: ${{ steps.nightly.outputs.kicad_version }}
       kicad_full_version: ${{ steps.nightly.outputs.kicad_full_version }}
@@ -69,9 +73,23 @@ jobs:
         env:
           COMMIT: ${{ inputs.commit }}
         run: python3 scripts/resolve_nightly.py ${COMMIT:+--commit "$COMMIT"}
+      # A scheduled run builds only a version not yet released; a dispatch always builds.
+      - name: Already released?
+        id: fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.nightly.outputs.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = schedule ] && gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "$TAG is released already"; echo fresh=false >> "$GITHUB_OUTPUT"
+          else
+            echo fresh=true >> "$GITHUB_OUTPUT"
+          fi
       - name: KiCad's notices at the commit
+        if: steps.fresh.outputs.fresh == 'true'
         run: python3 scripts/kicad_licenses.py "${{ steps.nightly.outputs.commit }}" licenses
       - uses: actions/upload-artifact@v7
+        if: steps.fresh.outputs.fresh == 'true'
         with:
           name: kicad-licenses
           path: licenses/
@@ -79,17 +97,23 @@ jobs:
   # The KiPy the release pairs with this KiCad: its API changes with the nightly, and the matched client
   # is not on PyPI. Pure Python, so one wheel serves every platform.
   kicad-python:
-    if: github.event_name == 'workflow_dispatch'
+    needs: resolve
+    if: needs.resolve.outputs.fresh == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.build.outputs.commit }}
     steps:
       - uses: astral-sh/setup-uv@v10.2.0
       - name: Build kicad-python at the commit
+        id: build
         env:
-          KIPY: ${{ inputs.kicad_python }}
+          # A scheduled build pairs the newest client; the smoke tests' API round trip fails a mismatch.
+          KIPY: ${{ inputs.kicad_python || 'main' }}
         run: |
           git clone --quiet https://gitlab.com/kicad/code/kicad-python.git kicad-python
           git -C kicad-python checkout --quiet "$KIPY"
           git -C kicad-python submodule update --quiet --init --recursive
+          echo "commit=$(git -C kicad-python rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           uv build --wheel --out-dir dist kicad-python
           # Its poetry build script (which generates the protobuf code) tags the wheel for the building
           # interpreter and platform; the wheel is pure Python, so it is retagged for every one.
@@ -206,6 +230,7 @@ jobs:
 
   linux:
     needs: resolve
+    if: needs.resolve.outputs.fresh == 'true'
     runs-on: ubuntu-latest
     container: debian:12
     timeout-minutes: 330
@@ -293,7 +318,7 @@ jobs:
 
   publish:
     needs: [resolve, kicad-python, macos, macos-14, windows, linux, linux-smoke]
-    if: inputs.publish
+    if: inputs.publish || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -322,6 +347,7 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
           COMMIT: ${{ needs.resolve.outputs.commit }}
           FULL: ${{ needs.resolve.outputs.kicad_full_version }}
+          KIPY: ${{ needs.kicad-python.outputs.commit }}
         run: |
           ls -la dist sources
           cat > notes.md <<EOF
@@ -331,7 +357,8 @@ jobs:
           uv pip install "kicad-cli-bin==${TAG#v}" --find-links https://github.com/${{ github.repository }}/releases/expanded_assets/$TAG
           \`\`\`
 
-          The kicad-python wheel is the client matched to this KiCad. The source attached: KiCad's at the
+          The kicad-python wheel is the client matched to this KiCad, built from kicad-python
+          [\`${KIPY:0:10}\`](https://gitlab.com/kicad/code/kicad-python/-/commit/$KIPY). The source attached: KiCad's at the
           commit, and the Debian source package of every library the Linux wheel bundles.
           EOF
           gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
