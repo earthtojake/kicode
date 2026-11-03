@@ -12,8 +12,9 @@
 #     netlist work calls on); GerbView's, the drawing sheet editor's and the calculator's are not built,
 #   usr/lib/ every shared library they link, but glibc's,
 #   usr/lib/x86_64-linux-gnu/kicad/plugins/3d/ the 3D model plugins,
-#   share/kicad/ the stock data a run reads (KICAD_STOCK_DATA_HOME): the image archive, the project template
-#     and the API plugin manager's schema.
+#   share/kicad/ the stock data a run reads (KICAD_STOCK_DATA_HOME): the project template and the API plugin
+#     manager's schema. Not the image archive: only the GUI draws icons, and the macOS and Windows wheels
+#     carry none either.
 # Each ELF is stripped and gets an old-style RPATH (DT_RPATH, which also serves the libraries it loads)
 # relative to itself, and none needs a glibc newer than 2.36.
 # <out dir>/schematic/files.txt lists, relative to <out dir>/kicode/, the files only the schematic kifaces
@@ -36,7 +37,9 @@
 # KiCad and wxWidgets are compiled with Debian 12's Clang 19 at -O2. Not GCC 12: GCC 12.2 stops with an
 # internal compiler error on pcbnew's constraint solver ("unexpected expression 'BlockRows' of kind
 # template_parm_index"). Clang builds against Debian 12's libstdc++, so the libraries the build links are
-# Debian 12's still.
+# Debian 12's still. Both link with --as-needed, as Ubuntu's toolchain does by default: KiCad names every
+# library on every target's link line, and without it each binary needs them all (Boost.Locale, for one,
+# whose only use is header-only, and with it ICU, 14 MB of the wheel).
 #
 # KICAD_FULL_VERSION (10.99.0-6189-g113c71d59d, as KiCad's own builds of the commit name themselves) stamps
 # the build, which a tarball has no git history to work out. KICAD_SRC (a checkout or unpacked tarball of
@@ -53,6 +56,8 @@ wx_sha256=${WX_SHA256:-81b09d6dd9f1ed9301f8c55a968a488d0491f264dc2bab19a7e407ac6
 wx_prefix=${WX_PREFIX:-/opt/wxwidgets}
 wx_tarball=/tmp/wxWidgets-$wx_version.tar.bz2 wx_src=/tmp/wxWidgets-$wx_version wx_build=/tmp/wx-build
 release_flags="-O2 -DNDEBUG"
+link_flags=(-DCMAKE_EXE_LINKER_FLAGS=-Wl,--as-needed -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--as-needed
+            -DCMAKE_MODULE_LINKER_FLAGS=-Wl,--as-needed)
 export DEBIAN_FRONTEND=noninteractive
 
 # KiCad's own dependency list (install-deps.sh at the commit), as Debian 12 names it, without the
@@ -122,7 +127,7 @@ cmake -S "$wx_src" -B "$wx_build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_IN
     -DwxUSE_LIBWEBP=sys -DwxUSE_NANOSVG=builtin -DwxUSE_LUNASVG=OFF \
     -DwxUSE_WEBVIEW=ON -DwxUSE_WEBVIEW_WEBKIT=OFF -DwxUSE_WEBVIEW_CHROMIUM=OFF -DwxUSE_MEDIACTRL=OFF \
     -DwxUSE_LIBNOTIFY=OFF -DwxUSE_LIBSDL=OFF -DwxUSE_LIBMSPACK=OFF -DwxUSE_SPELLCHECK=OFF -DwxUSE_LIBGNOMEVFS=OFF \
-    -DwxUSE_GLCANVAS_EGL=OFF
+    -DwxUSE_GLCANVAS_EGL=OFF "${link_flags[@]}"
 cmake --build "$wx_build"
 # Every library wxWidgets links is Debian's, with its copyright file, but the code it builds in (Scintilla
 # and Lexilla, NanoSVG), whose notices are staged below.
@@ -150,10 +155,9 @@ if [ -n "${KICAD_FULL_VERSION:-}" ]; then
     grep -q "\"$KICAD_FULL_VERSION\"" "$src/cmake/KiCadVersion.cmake"
 fi
 
-targets=(kicad-cli pcbnew_kiface eeschema_kiface cvpcb_kiface s3d_plugin_oce s3d_plugin_vrml s3d_plugin_idf
-         bitmap_archive_build)
+targets=(kicad-cli pcbnew_kiface eeschema_kiface cvpcb_kiface s3d_plugin_oce s3d_plugin_vrml s3d_plugin_idf)
 cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-    -DCMAKE_C_FLAGS_RELEASE="$release_flags" -DCMAKE_CXX_FLAGS_RELEASE="$release_flags" \
+    -DCMAKE_C_FLAGS_RELEASE="$release_flags" -DCMAKE_CXX_FLAGS_RELEASE="$release_flags" "${link_flags[@]}" \
     -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DwxWidgets_CONFIG_EXECUTABLE="$wx_prefix/bin/wx-config" \
@@ -165,13 +169,12 @@ ccache --show-stats || true
 kicad="$out/kicode/_kicad"
 rm -rf "$kicad" "$out/licenses/linux" "$out/schematic" "$out/sources.txt"
 bin="$kicad/usr/bin" lib="$kicad/usr/lib" plugins="$kicad/usr/lib/x86_64-linux-gnu/kicad/plugins/3d"
-mkdir -p "$bin" "$lib" "$plugins" "$kicad/share/kicad/resources" "$kicad/share/kicad/template" \
-    "$kicad/share/kicad/schemas" "$out/licenses/linux" "$out/schematic/licenses/linux"
+mkdir -p "$bin" "$lib" "$plugins" "$kicad/share/kicad/template" "$kicad/share/kicad/schemas" \
+    "$out/licenses/linux" "$out/schematic/licenses/linux"
 
 cp "$build/kicad/kicad-cli" "$bin/"
 for kiface in pcbnew eeschema cvpcb; do cp "$build/$kiface/_$kiface.kiface" "$bin/"; done
 find "$build/plugins/3d" -name 'libs3d_plugin_*.so' -exec cp {} "$plugins/" \;
-cp "$build/resources/images.tar.gz" "$kicad/share/kicad/resources/"
 cp "$src/resources/project_template/kicad.kicad_pro" "$kicad/share/kicad/template/"
 cp "$src/api/schemas/api.v1.schema.json" "$kicad/share/kicad/schemas/"
 test "$(find "$plugins" -name 'libs3d_plugin_*.so' | wc -l)" -eq 3 || { echo "expected three 3D plugins" >&2; exit 1; }
