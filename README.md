@@ -111,14 +111,26 @@ which with what it links would add some 65 MB to a wheel, for web pages only KiC
 - Versions are KiCad's. A nightly is `X.99.0.devYYYYMMDD`, the date of KiCad's macOS nightly of its
   commit; the three distributions of one build share it.
 - Every day, the newest KiCad nightly that builds and passes on every platform is published as a GitHub
-  prerelease (`v10.99.0.dev20261031`), whose page is a find-links index:
+  prerelease (`v10.99.0.dev20261031`), whose page is a find-links index. A release is immutable once
+  published: it is made a draft with every asset and published only when each asset is in it.
 
   ```bash
   uv pip install "kicode==10.99.0.dev20261031" \
     --find-links https://github.com/earthtojake/kicode/releases/expanded_assets/v10.99.0.dev20261031
   ```
 
-- A nightly that a text-to-cad release pins is promoted to PyPI, the release's own wheels unchanged.
+- A nightly that a text-to-cad release pins is promoted to PyPI, the release's own wheels unchanged: a
+  dispatch of the build with `pypi` uploads them, never the daily schedule. PyPI's trusted publishers
+  take one pending publisher per repository, workflow and environment, so each distribution has its own
+  environment (owner `earthtojake`, repository `kicode`, workflow `build.yml`; each environment asks
+  earthtojake's review and deploys from `main` only), and uploads in this order, so that PyPI never lists
+  a kicode whose parts it lacks:
+
+  | Order | PyPI project | GitHub environment | Wheels |
+  | --- | --- | --- | --- |
+  | 1 | `kicode-pcb` | `pypi-pcb` | one per platform |
+  | 2 | `kicode-sch` | `pypi-sch` | one per platform |
+  | 3 | `kicode` | `pypi` | one, `py3-none-any` |
 
 ## Building
 
