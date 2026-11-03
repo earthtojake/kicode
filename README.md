@@ -91,7 +91,7 @@ pcbnew's in kicode-pcb, eeschema's and cvpcb's in kicode-sch. GerbView's, the dr
 the calculator's are left out, so `kicad-cli gerber` is not available. No GUI, and none of KiCad's
 symbol, footprint or 3D model libraries (over 3 GB): point `KICAD10_FOOTPRINT_DIR`, `KICAD10_SYMBOL_DIR`
 and `KICAD10_3DMODEL_DIR` at a copy of them, with library tables in `KICAD_CONFIG_HOME`, when a run needs
-them. On Windows, ngspice is not carried (KiCad loads it only to simulate).
+them. ngspice, which KiCad loads only to simulate, is carried on macOS alone, where eeschema links it.
 
 The Linux build's wxWidgets has wxWebView without a browser engine: on GTK the only one is WebKitGTK,
 which with what it links would add some 65 MB to a wheel, for web pages only KiCad's GUI shows.

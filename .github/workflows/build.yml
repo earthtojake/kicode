@@ -90,7 +90,9 @@ jobs:
         env:
           COMMIT: ${{ inputs.commit }}
         run: python3 scripts/resolve_nightly.py ${COMMIT:+--commit "$COMMIT"}
-      # A scheduled run builds only a version not yet released; a dispatch builds unless it only promotes.
+      # Releases are immutable once published, and only a published one counts (the tags endpoint finds no
+      # draft): a scheduled run builds only a version not yet published, so a rerun of one skips cleanly; a
+      # dispatch builds unless it only promotes, and stops here if it would publish a version published already.
       - name: Build?
         id: build
         env:
@@ -99,8 +101,12 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
           PYPI: ${{ inputs.pypi }}
         run: |
-          if [ "${{ github.event_name }}" = schedule ] && gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "$TAG is released already"; echo build=false >> "$GITHUB_OUTPUT"
+          published=false
+          if gh api "repos/${{ github.repository }}/releases/tags/$TAG" >/dev/null 2>&1; then published=true; fi
+          if [ "${{ github.event_name }}" = schedule ] && [ "$published" = true ]; then
+            echo "$TAG is published already"; echo build=false >> "$GITHUB_OUTPUT"
+          elif [ "$PUBLISH" = true ] && [ "$published" = true ]; then
+            echo "::error::$TAG is published already, and a published release cannot be replaced"; exit 1
           elif [ "$PYPI" = true ] && [ "$PUBLISH" != true ]; then
             echo "promoting $TAG's release to PyPI: nothing to build"; echo build=false >> "$GITHUB_OUTPUT"
           else
@@ -416,9 +422,13 @@ jobs:
           commit="${{ needs.resolve.outputs.commit }}"
           curl -fsSL --retry 5 -o "sources/kicad-$commit.tar.gz" \
             "https://gitlab.com/kicad/code/kicad/-/archive/$commit/kicad-$commit.tar.gz"
+      # Releases are immutable once published: the release is made a draft with every asset, each asset is
+      # checked against the file it came from, and only then is it published. A failure on the way leaves a
+      # draft (which the next attempt replaces), never a published release that lacks a file.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
           COMMIT: ${{ needs.resolve.outputs.commit }}
           FULL: ${{ needs.resolve.outputs.kicad_full_version }}
@@ -428,6 +438,12 @@ jobs:
           test "$(ls dist/*.whl | wc -l)" -eq 7 || { echo "::error::expected seven wheels"; exit 1; }
           for wheel in dist/*.whl; do
             [ "$(wc -c < "$wheel")" -lt 100000000 ] || { echo "::error::$wheel is 100 MB or more"; exit 1; }
+          done
+          if gh api "repos/$REPO/releases/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG is published already, and a published release cannot be replaced"; exit 1
+          fi
+          for id in $(gh api "repos/$REPO/releases" --paginate --jq ".[] | select(.draft and .tag_name == \"$TAG\") | .id"); do
+            echo "deleting draft $id of $TAG, left by an earlier attempt"; gh api -X DELETE "repos/$REPO/releases/$id"
           done
           cat > notes.md <<EOF
           KiCad nightly \`$FULL\`, commit [\`$COMMIT\`](https://gitlab.com/kicad/code/kicad/-/commit/$COMMIT), with KiPy
@@ -443,9 +459,18 @@ jobs:
           the commit, and for the Linux wheels the Debian source package of every library they bundle and wxWidgets'
           release tarball.
           EOF
-          gh release create "$TAG" --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+          gh release create "$TAG" --repo "$REPO" --draft --target "${{ github.sha }}" \
             --title "kicode ${TAG#v}" --notes-file notes.md --prerelease \
             dist/*.whl sources/*
+          id=$(gh api "repos/$REPO/releases" --paginate --jq ".[] | select(.draft and .tag_name == \"$TAG\") | .id")
+          test "$(echo "$id" | wc -w)" -eq 1 || { echo "::error::expected one draft of $TAG, found: $id"; exit 1; }
+          gh api "repos/$REPO/releases/$id/assets" --paginate --jq '.[] | "\(.name) \(.size) \(.state)"' | sort > uploaded.txt
+          for file in dist/*.whl sources/*; do echo "$(basename "$file") $(wc -c < "$file" | tr -d ' ') uploaded"; done | sort > expected.txt
+          if ! diff expected.txt uploaded.txt; then
+            echo "::error::the draft of $TAG does not hold every asset as made: it stays a draft"; exit 1
+          fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false
+          gh api "repos/$REPO/releases/tags/$TAG" --jq '"published \(.tag_name): \(.assets | length) assets, immutable \(.immutable)"'
 
   # Promotion to PyPI: the release's wheels, unchanged, one distribution per job and environment.
   pypi-pcb:
