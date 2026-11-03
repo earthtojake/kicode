@@ -33,7 +33,7 @@ export DEBIAN_FRONTEND=noninteractive
 # that backend is optional and a command line never draws on a GPU.
 apt-get update -q
 apt-get install -y -q --no-install-recommends \
-    build-essential cmake ninja-build pkg-config ccache git ca-certificates curl file patchelf python3 \
+    build-essential clang-19 cmake ninja-build pkg-config ccache git ca-certificates curl file patchelf python3 \
     libcairo2-dev libpixman-1-dev libpng-dev libglu1-mesa-dev libgl1-mesa-dev libegl-dev libx11-dev \
     mesa-common-dev libgtk-3-dev libglm-dev libwxgtk3.2-dev libwxgtk-webview3.2-dev libbz2-dev libssl-dev \
     libzstd-dev zlib1g-dev libocct-modeling-algorithms-dev libocct-modeling-data-dev libocct-data-exchange-dev \
@@ -56,7 +56,11 @@ fi
 
 targets=(kicad-cli pcbnew_kiface eeschema_kiface cvpcb_kiface gerbview_kiface pl_editor_kiface
          pcb_calculator_kiface s3d_plugin_oce s3d_plugin_vrml s3d_plugin_idf bitmap_archive_build)
+# Clang, not Debian 12's GCC 12: GCC 12.2 stops with an internal compiler error on pcbnew's constraint
+# solver ("unexpected expression 'BlockRows' of kind template_parm_index"). Clang 19 is Debian 12's own
+# package and builds against its libstdc++, so the libraries the build links are Debian 12's still.
 cmake -S "$src" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_C_COMPILER=clang-19 -DCMAKE_CXX_COMPILER=clang++-19 \
     -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     -DKICAD_BUILD_QA_TESTS=OFF -DKICAD_SPICE_QA=OFF -DKICAD_BUILD_I18N=OFF -DKICAD_UPDATE_CHECK=OFF \
     -DKICAD_USE_SENTRY=OFF -DKICAD_INSTALL_DEMOS=OFF -DKICAD_USE_PCH=OFF
