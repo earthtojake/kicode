@@ -12,7 +12,8 @@
 #     netlist work calls on); GerbView's, the drawing sheet editor's and the calculator's are not built,
 #   usr/lib/ every shared library they link, but glibc's,
 #   usr/lib/x86_64-linux-gnu/kicad/plugins/3d/ the 3D model plugins,
-#   share/kicad/ the stock data a run reads (KICAD_STOCK_DATA_HOME): the image archive and the project template.
+#   share/kicad/ the stock data a run reads (KICAD_STOCK_DATA_HOME): the image archive, the project template
+#     and the API plugin manager's schema.
 # Each ELF is stripped and gets an old-style RPATH (DT_RPATH, which also serves the libraries it loads)
 # relative to itself, and none needs a glibc newer than 2.36.
 # <out dir>/schematic/files.txt lists, relative to <out dir>/kicode/, the files only the schematic kifaces
@@ -165,13 +166,14 @@ kicad="$out/kicode/_kicad"
 rm -rf "$kicad" "$out/licenses/linux" "$out/schematic" "$out/sources.txt"
 bin="$kicad/usr/bin" lib="$kicad/usr/lib" plugins="$kicad/usr/lib/x86_64-linux-gnu/kicad/plugins/3d"
 mkdir -p "$bin" "$lib" "$plugins" "$kicad/share/kicad/resources" "$kicad/share/kicad/template" \
-    "$out/licenses/linux" "$out/schematic/licenses/linux"
+    "$kicad/share/kicad/schemas" "$out/licenses/linux" "$out/schematic/licenses/linux"
 
 cp "$build/kicad/kicad-cli" "$bin/"
 for kiface in pcbnew eeschema cvpcb; do cp "$build/$kiface/_$kiface.kiface" "$bin/"; done
 find "$build/plugins/3d" -name 'libs3d_plugin_*.so' -exec cp {} "$plugins/" \;
 cp "$build/resources/images.tar.gz" "$kicad/share/kicad/resources/"
 cp "$src/resources/project_template/kicad.kicad_pro" "$kicad/share/kicad/template/"
+cp "$src/api/schemas/api.v1.schema.json" "$kicad/share/kicad/schemas/"
 test "$(find "$plugins" -name 'libs3d_plugin_*.so' | wc -l)" -eq 3 || { echo "expected three 3D plugins" >&2; exit 1; }
 
 # glibc's own libraries, the one part of the system the wheels rely on.

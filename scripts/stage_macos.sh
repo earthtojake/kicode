@@ -22,8 +22,10 @@
 # asks of a quarantined download (an installed wheel is none).
 set -euo pipefail
 
-dmg=$1 arch=$2 out=$3
+dmg=$1 arch=$2
 case "$arch" in arm64|x86_64) ;; *) echo "arch must be arm64 or x86_64" >&2; exit 2 ;; esac
+mkdir -p "$3"
+out=$(cd "$3" && pwd)
 
 mount=$(mktemp -d)
 cleanup() { hdiutil detach -quiet "$mount" 2>/dev/null || true; rmdir "$mount" 2>/dev/null || true; }

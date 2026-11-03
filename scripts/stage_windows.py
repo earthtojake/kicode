@@ -9,7 +9,8 @@ the kifaces and 3D plugins it loads by name (pcbnew's kiface for every pcb comma
 eeschema's and cvpcb's for the sch and sym ones, plugins/3d/), and every DLL of the folder they import,
 transitively, by their PE import and delay-load tables. Nothing else: GerbView's, the drawing sheet
 editor's and the calculator's kifaces, the GUI programs, and every DLL nothing staged imports are left out.
-KiCad's signatures on the files are left as they are. Nothing of share/ is staged: a run reads none of it.
+KiCad's signatures on the files are left as they are. Of share/, only share/kicad/schemas/api.v1.schema.json,
+which every run reads (the API plugin manager's schema); nothing else of it is read.
 <out dir>/schematic/files.txt lists the files only the schematic kifaces need (the two kifaces and every
 DLL nothing else staged imports), relative to <out dir>/kicode/: the kicode-sch wheel carries them,
 and the kicode-pcb wheel everything else (make_wheel.py). An import the folder does not hold is Windows' own.
@@ -30,6 +31,7 @@ from pathlib import Path
 BOARD = ["kicad-cli.exe", "_pcbnew.dll"]
 SCHEMATIC = ["_eeschema.dll", "_cvpcb.dll"]
 PLUGINS = "plugins/3d"
+SCHEMA = "api.v1.schema.json"
 
 
 def unpack(installer: Path, into: Path) -> Path:
@@ -132,6 +134,13 @@ def stage(program: Path, out: Path) -> int:
         shutil.copy2(program / relative, kicad / "bin" / relative)
     (out / "schematic" / "files.txt").write_text("".join(f"_kicad/bin/{relative}\n" for relative in sorted(schematic)),
                                                 encoding="utf-8")
+    # The one file of share/ every run reads: the API plugin manager's schema, which kicad-cli otherwise
+    # reports missing ("schema file ... not found") on every run.
+    schema = next(iter(sorted(program.parent.rglob(SCHEMA))), None)
+    if schema is None:
+        raise SystemExit(f"no {SCHEMA} beside the program folder {program}")
+    (kicad / "share" / "kicad" / "schemas").mkdir(parents=True)
+    shutil.copy2(schema, kicad / "share" / "kicad" / "schemas" / SCHEMA)
     everything = [path for path in program.rglob("*") if path.is_file()]
     left = sorted((path for path in everything if path.relative_to(program).as_posix() not in board | schematic),
                   key=lambda path: -path.stat().st_size)
