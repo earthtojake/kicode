@@ -211,7 +211,7 @@ for elf in "$bin"/* "$plugins"/* "$lib"/*; do
     strip --strip-unneeded "$elf" 2>/dev/null || true
 done
 for elf in "$bin"/*; do file -b "$elf" | grep -q ELF && patchelf --force-rpath --set-rpath '$ORIGIN/../lib' "$elf"; done
-for elf in "$lib"/*; do patchelf --force-rpath --set-rpath '$ORIGIN' "$elf"; done
+for elf in "$lib"/*; do [ -f "$elf" ] || continue; patchelf --force-rpath --set-rpath '$ORIGIN' "$elf"; done  # the plugins' folder too
 for elf in "$plugins"/*; do patchelf --force-rpath --set-rpath '$ORIGIN/../../../..' "$elf"; done
 
 # The glibc floor: no staged ELF may need a symbol version newer than Debian 12's glibc, 2.36.
