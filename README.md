@@ -31,8 +31,8 @@ package is `kicode`.
 | Distribution | What it is | Wheels (sizes of 10.99.0.dev20261031) |
 | --- | --- | --- |
 | `kicode` | What to install: no files of its own; it requires `kicode-pcb` and `kicode-sch` of the same version. | one, `py3-none-any` (17 kB) |
-| `kicode-pcb` | The board side and the `kicode` package: `kicad-cli`, pcbnew's kiface (every `kicad-cli pcb` and `fp` command, and the API server), the 3D model plugins, every library they link, and KiPy. | macOS arm64 76.2 MB, Windows x86_64 54.8 MB, Linux x86_64 LINUX_PCB MB |
-| `kicode-sch` | The schematic side: the eeschema and cvpcb kifaces (every `kicad-cli sch` and `sym` command) and the libraries only they link, installed into kicode-pcb's folder. It requires `kicode-pcb` of the same version. | macOS arm64 26.2 MB, Windows x86_64 18.1 MB, Linux x86_64 LINUX_SCH MB |
+| `kicode-pcb` | The board side and the `kicode` package: `kicad-cli`, pcbnew's kiface (every `kicad-cli pcb` and `fp` command, and the API server), the 3D model plugins, every library they link, and KiPy. | macOS arm64 76.2 MB, Windows x86_64 54.8 MB, Linux x86_64 84.9 MB |
+| `kicode-sch` | The schematic side: the eeschema and cvpcb kifaces (every `kicad-cli sch` and `sym` command) and the libraries only they link, installed into kicode-pcb's folder. It requires `kicode-pcb` of the same version. | macOS arm64 26.2 MB, Windows x86_64 18.1 MB, Linux x86_64 24.6 MB |
 
 | Platform | kicad-cli from | Minimum OS | Wheel tag |
 | --- | --- | --- | --- |
