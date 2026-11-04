@@ -4,8 +4,9 @@
     python tests/smoke.py --installed kicode [--expect-version 10.99.0] [--no-api]       # kicode-pcb and kicode-sch
 
 Every run is headless with the package's own environment() and a scratch root, from a copy of the fixture
-board: the version, DRC, and every board export text-to-cad uses (STEP, Gerbers, drill, positions, SVG,
-PDF); and (unless --no-api) the board edited through `kicad-cli api-server` with kicode's KiPy and saved.
+board: the version, the `kicad-cli` console script beside the Python (the packaged kicad-cli's output and
+exit code, its homes in KICODE_HOME's root), DRC, and every board export text-to-cad uses (STEP, Gerbers,
+drill, positions, SVG, PDF); and (unless --no-api) the board edited through `kicad-cli api-server` with kicode's KiPy and saved.
 With kicode installed it also exports the schematic's netlist; with kicode-pcb alone it checks that
 `python -m kicode sch` says to install kicode-sch instead. Either way the import package must be kicode
 (KiPy's modules under it, no kipy), and the run fails when any step fails or left anything in the person's
@@ -121,6 +122,31 @@ class Smoke:
               f"{kicode.KICAD_VERSION} ({kicode.KICAD_COMMIT[:10]}), KiPy {kicode.KIPY_VERSION} ({kicode.KIPY_COMMIT[:10]}), "
               f"schematic {kicode.has_schematic()}")
 
+    def console_script(self, version: str) -> None:
+        """The `kicad-cli` console script beside this Python runs the packaged one: its output and exit code
+        as the binary's, its KiCad homes in KICODE_HOME's root."""
+        script = Path(sys.executable).parent / ("kicad-cli.exe" if sys.platform.startswith("win") else "kicad-cli")
+        if not script.is_file():
+            self.failures.append(f"no kicad-cli console script at {script}")
+            return
+        root = self.root / "console-script"
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("KICAD_", "KICODE_"))}
+        env["KICODE_HOME"] = str(root)
+        done = subprocess.run([str(script), "version"], env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=300)
+        if (done.returncode, done.stdout.strip()) != (0, version):
+            self.failures.append(f"console script kicad-cli version exited {done.returncode}: {done.stdout}{done.stderr}")
+        if not (root / "settings").is_dir() or not any((root / "settings").iterdir()):
+            self.failures.append(f"console script kicad-cli wrote no settings in KICODE_HOME's root, {root}")
+        missing = str(self.work / "missing.kicad_pcb")
+        ours = subprocess.run([str(script), "pcb", "drc", missing], env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=300).returncode
+        theirs = self.run("pcb", "drc", missing, ok=range(1, 256)).returncode
+        if ours != theirs or ours == 0:
+            self.failures.append(f"console script kicad-cli exited {ours} on a missing board, the binary {theirs}")
+        else:
+            print(f"ok  console script {script.name}: version {version}, exit code {ours} passed through")
+
     def schematic_missing(self) -> None:
         """Without kicode-sch, `python -m kicode sch` stops with what to install."""
         done = subprocess.run([sys.executable, "-m", "kicode", "sch", "export", "netlist", "-o", str(self.out / "x.net"),
@@ -194,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     expected = args.expect_version or kicode.KICAD_VERSION
     if expected and version != expected:
         smoke.failures.append(f"kicad-cli version says {version!r}, expected {expected!r}")
+    smoke.console_script(version)
     smoke.run("pcb", "drc", "--format", "json", "-o", str(smoke.out / "drc.json"), str(smoke.board))
     if (smoke.out / "drc.json").is_file():
         json.loads((smoke.out / "drc.json").read_text(encoding="utf-8"))

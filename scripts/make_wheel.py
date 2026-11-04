@@ -28,6 +28,10 @@ wheel's description, with a line saying which distribution's page it is after th
 A wheel of 100 MB or more (1e8 bytes, as PyPI counts the file it limits) is not written: the build fails
 instead, so none can reach an upload. A wheel holds no symlinks: a stager copies each file under the
 name it is loaded by. Executable bits are kept, so the installed kicad-cli runs.
+
+kicode-pcb's wheel declares one console script (its entry_points.txt, what [project.scripts] would write):
+`kicad-cli`, which the installer puts in the environment's scripts folder (bin/, or Scripts\\ on Windows)
+and which runs the packaged kicad-cli headless (kicode._launcher).
 """
 
 from __future__ import annotations
@@ -47,6 +51,8 @@ PACKAGE = "kicode"  # the import package, which kicode-pcb installs
 META, PCB, SCH = "kicode", "kicode-pcb", "kicode-sch"
 REPOSITORY = "https://github.com/earthtojake/kicode"
 LIMIT = 100_000_000
+# kicode-pcb's console scripts: `kicad-cli`, the packaged one run headless (kicode._launcher).
+SCRIPTS = {"kicad-cli": "kicode._launcher:main"}
 SUMMARIES = {
     META: "Unofficial headless build of KiCad's command line and IPC API client. Not affiliated with or "
           "endorsed by the KiCad project.",
@@ -111,7 +117,8 @@ class Wheel:
             if path.is_file():
                 self.add_licenses_file(f"{prefix}{path.relative_to(folder).as_posix()}", path)
 
-    def finish(self, version: str, requires: list[str], requires_python: str, urls: list[str], lead: str) -> Path:
+    def finish(self, version: str, requires: list[str], requires_python: str, urls: list[str], lead: str,
+               scripts: dict[str, str] | None = None) -> Path:
         metadata = "\n".join([
             "Metadata-Version: 2.4",
             f"Name: {self.name}",
@@ -129,6 +136,9 @@ class Wheel:
             _description(lead),
         ])
         self.add(f"{self.info}/METADATA", metadata.encode())
+        if scripts:
+            self.add(f"{self.info}/entry_points.txt", ("[console_scripts]\n" + "".join(
+                f"{name} = {target}\n" for name, target in sorted(scripts.items()))).encode())
         self.add(f"{self.info}/WHEEL", (f"Wheel-Version: 1.0\nGenerator: kicode make_wheel\n"
                                         f"Root-Is-Purelib: {'true' if self.purelib else 'false'}\nTag: {self.tag}\n").encode())
         item = zipfile.ZipInfo(f"{self.info}/RECORD", date_time=(2020, 1, 1, 0, 0, 0))
@@ -203,7 +213,8 @@ def platform(staged: Path, version: str, tag: str, kicad_version: str, commit: s
     wheels = [pcb.finish(version, kipy["requires_dist"], requires_python,
                          [kicad_url, f"KiPy source, https://gitlab.com/kicad/code/kicad-python/-/tree/{kipy['commit']}"],
                          f"This is **{PCB}** {version}, kicode's board side and its `kicode` package: {kicad}, with "
-                         f"KiPy ({kipy['name']}) {kipy['version']} at commit `{kipy['commit'][:10]}`.")]
+                         f"KiPy ({kipy['name']}) {kipy['version']} at commit `{kipy['commit'][:10]}`.",
+                         SCRIPTS)]
 
     sch = Wheel(out, SCH, version, tag)
     for relative in schematic:

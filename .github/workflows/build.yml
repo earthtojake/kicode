@@ -21,7 +21,7 @@
 # need three environments. kicode-pcb goes first and kicode last, so PyPI never lists a kicode whose
 # parts it lacks.
 #
-# A push or pull request runs only `check`: the scripts parse.
+# A push or pull request runs only `check`: the scripts parse, and the kicad-cli console script's tests pass.
 name: Build
 
 on:
@@ -64,10 +64,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: The scripts parse
         run: |
           python3 -m py_compile scripts/*.py tests/*.py src/kicode/*.py
           for script in scripts/*.sh; do bash -n "$script"; done
+      - name: The console script (tests/test_launcher.py)
+        run: python3 -m unittest discover -s tests -v
 
   resolve:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
