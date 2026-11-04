@@ -57,6 +57,27 @@ uv pip install "kicode==10.99.0.dev20261031" \
   --find-links https://github.com/earthtojake/kicode/releases/expanded_assets/v10.99.0.dev20261031
 ```
 
+## The kicad-cli command
+
+kicode-pcb installs a `kicad-cli` command (a console script) in the environment it is installed into, so
+`kicad-cli …`, `uv run --with kicode kicad-cli …` and `uvx --from kicode-pcb kicad-cli …` run the packaged
+kicad-cli, headless:
+
+```bash
+kicad-cli version
+kicad-cli pcb export step -o board.step board.kicad_pcb
+```
+
+Its arguments, stdin, stdout, stderr and exit code are KiCad's own: on macOS and Linux the command becomes
+the packaged program (`exec`); on Windows, which has no exec, it runs it and exits with its code. Its KiCad
+homes are kicode's, never the person's own settings: `environment(root)` beneath the caller's environment,
+`root` being `KICODE_HOME` when it is set, else `~/Library/Caches/kicode` on macOS and
+`$XDG_CACHE_HOME/kicode` (else `~/.cache/kicode`) on Linux and Windows, kept from run to run. A variable the
+caller sets is kept, so a program that runs it with homes of its own (`KICAD_CONFIG_HOME`,
+`KICAD_DOCUMENTS_HOME`, `KICAD_CACHE_HOME`) gets those; `HOME` and the temporary folder stay the caller's.
+On Linux `KICAD_STOCK_DATA_HOME` and `APPDIR` are always the package's. A schematic command (`sch`, `sym`)
+with kicode-pcb alone stops with what to install, as `python -m kicode` does.
+
 ## Python API
 
 kicode's own names:
@@ -95,7 +116,7 @@ server.terminate()
 ```
 
 `python -m kicode` prints the executable's path, and `python -m kicode <arguments>` runs it headless in a
-temporary root. With kicode-pcb alone, `kicad-cli sch …` stops with KiCad's own
+temporary root of its own each run (the `kicad-cli` command keeps one root instead). With kicode-pcb alone, `kicad-cli sch …` stops with KiCad's own
 `Failed to load kiface library '…/_eeschema.kiface'`, and `python -m kicode sch …` says to install
 kicode-sch.
 
@@ -143,6 +164,10 @@ KiPy commit. Install one or the other.
   above).
 - PyPI: only versions promoted there, because a text-to-cad release pins them. The wheels are the GitHub
   release's, unchanged.
+- A change to kicode alone (its own modules, scripts or metadata) has no version of its own: a published
+  release is immutable, PyPI never takes a version twice, and PEP 440 has no segment after `.devN` that
+  sorts before the next nightly. It ships with the next nightly built from `main`, the schedule's or a
+  dispatch's, and is promoted to PyPI like any other.
 
 ## Release flow
 
@@ -167,8 +192,9 @@ The workflow's scripts run locally too: `scripts/resolve_nightly.py` finds a nig
 `scripts/stage_macos.sh`, `scripts/stage_windows.py` and `scripts/build_linux.sh` stage a platform's
 `kicode/_kicad/` tree and `schematic/files.txt` (what only the schematic kifaces need);
 `scripts/vendor_kipy.py` puts KiPy's modules in `kicode/`; `scripts/kicad_licenses.py` fetches KiCad's
-notices; `scripts/make_wheel.py` writes the wheels; and `tests/smoke.py` runs in the environment they are
-installed into.
+notices; `scripts/make_wheel.py` writes the wheels; `tests/smoke.py` runs in the environment they are
+installed into; and `python3 -m unittest discover -s tests` (a push's and a pull request's check) tests the
+`kicad-cli` command with a stand-in for KiCad.
 
 ## License
 
