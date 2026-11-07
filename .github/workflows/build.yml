@@ -214,10 +214,11 @@ jobs:
           name: wheel-macos-arm64
           path: dist/*.whl
 
-  # The wheels say macOS 14: run them on 14, not only on the runner that built them.
-  macos-14:
+  # The wheels say macOS 14. GitHub retired its macOS 14 runners on 2026-11-02 (actions/runner-images#13518), so
+  # they run on a second macOS, 26, not only on the runner that built them.
+  macos-26:
     needs: [resolve, macos]
-    runs-on: macos-14
+    runs-on: macos-26
     env:
       KICAD_VERSION: ${{ needs.resolve.outputs.kicad_version }}
     steps:
@@ -233,7 +234,7 @@ jobs:
         with:
           name: wheel-any
           path: any
-      - name: Smoke tests on macOS 14
+      - name: Smoke tests on macOS 26
         run: |
           sw_vers
           uv venv --python 3.12 smoke
@@ -407,7 +408,7 @@ jobs:
           /smoke/bin/python tests/smoke.py --installed kicode-pcb --no-api --expect-version "$KICAD_VERSION"
 
   publish:
-    needs: [resolve, kicad-python, macos, macos-14, windows, linux, linux-smoke]
+    needs: [resolve, kicad-python, macos, macos-26, windows, linux, linux-smoke]
     if: inputs.publish || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
