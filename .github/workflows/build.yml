@@ -32,9 +32,9 @@ on:
         required: false
         default: ""
       kicad_python:
-        description: "kicad-python commit or branch whose KiPy the wheels carry"
+        description: "kicad-python commit or branch whose KiPy the wheels carry; empty for KIPY_DEFAULT"
         required: false
-        default: "main"
+        default: ""
       publish:
         description: "Publish the GitHub Release"
         type: boolean
@@ -51,6 +51,14 @@ on:
 
 permissions:
   contents: read
+
+env:
+  # The KiPy every build carries unless a dispatch names another. Pinned, not `main`: KiPy's 6904820
+  # (2026-11-08, "Propagate per-item errors in create/update/delete path") unpacks a created or updated
+  # item twice in kipy/editor.py's create_items and update_items, so every one raises
+  # `AttributeError: type_url` and the api-server smoke test fails on every platform. a992ff6 is the
+  # commit before it. Back to `main` once KiPy's main passes the smoke test again.
+  KIPY_DEFAULT: a992ff6c91db18430f444703b2d1f8769e30935a
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
@@ -147,7 +155,7 @@ jobs:
       - name: Build kicad-python at the commit
         id: build
         env:
-          KIPY: ${{ inputs.kicad_python || 'main' }}
+          KIPY: ${{ inputs.kicad_python || env.KIPY_DEFAULT }}
         run: |
           git clone --quiet https://gitlab.com/kicad/code/kicad-python.git kicad-python
           git -C kicad-python checkout --quiet "$KIPY"
